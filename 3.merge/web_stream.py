@@ -86,6 +86,20 @@ class WebFrameServer:
       overflow: hidden;
       position: relative;
     }
+    .hover-info {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: rgba(15, 20, 30, 0.8);
+      color: #cfe3ff;
+      font-size: 12px;
+      font-family: Consolas, "Courier New", monospace;
+      pointer-events: none;
+      display: none;
+    }
     .stream {
       width: 100%;
       height: 100%;
@@ -96,8 +110,8 @@ class WebFrameServer:
       display: block;
     }
     .stream.mode-map {
-      width: 150%;
-      transform: translateX(-33.3333%);
+      width: 172%;
+      transform: translateX(-42%);
       transform-origin: top left;
     }
     .hintbar {
@@ -124,6 +138,7 @@ class WebFrameServer:
     <div class="stage">
       <div class="stream-box">
         <img id="stream" class="stream" src="/stream.mjpg" alt="stream" />
+        <div id="hoverInfo" class="hover-info"></div>
       </div>
     </div>
     <div class="hintbar">
@@ -136,6 +151,9 @@ class WebFrameServer:
 <script>
 (() => {
   const stream = document.getElementById("stream");
+  const hoverInfo = document.getElementById("hoverInfo");
+  const LEFT_RATIO = 0.42;
+  const RGB_RATIO = 0.64;
   const meta = document.getElementById("meta");
   const params = new URLSearchParams(window.location.search);
   const viewMode = (params.get("view") || "full").toLowerCase();
@@ -163,7 +181,57 @@ class WebFrameServer:
     if (viewMode === "map") {
       return true;
     }
-    return offsetX >= (width / 3);
+    return offsetX >= (width * LEFT_RATIO);
+  }
+
+  function getContentRect() {
+    const cw = stream.clientWidth;
+    const ch = stream.clientHeight;
+    const nw = stream.naturalWidth || cw;
+    const nh = stream.naturalHeight || ch;
+    const scale = Math.min(cw / nw, ch / nh);
+    const rw = nw * scale;
+    const rh = nh * scale;
+    const ox = (cw - rw) * 0.5;
+    const oy = (ch - rh) * 0.5;
+    return { ox, oy, rw, rh };
+  }
+
+  function update2DHover(e) {
+    // Hover helper only for full-view layout (left-bottom 2D lidar panel).
+    if (viewMode !== "full") {
+      hoverInfo.style.display = "none";
+      return;
+    }
+    const rect = stream.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const c = getContentRect();
+    if (x < c.ox || x > c.ox + c.rw || y < c.oy || y > c.oy + c.rh) {
+      hoverInfo.style.display = "none";
+      return;
+    }
+    const sx = (x - c.ox) / c.rw; // 0..1 in source image
+    const sy = (y - c.oy) / c.rh; // 0..1 in source image
+
+    // 2D lidar panel occupies left ratio and bottom (1-rgb_ratio) of source frame.
+    if (!(sx >= 0 && sx <= LEFT_RATIO && sy >= RGB_RATIO && sy <= 1.0)) {
+      hoverInfo.style.display = "none";
+      return;
+    }
+
+    // Local coordinates in 2D panel.
+    const u = sx / LEFT_RATIO;                  // 0..1 left panel width
+    const v = (sy - RGB_RATIO) / (1.0 - RGB_RATIO); // 0..1 bottom panel height, top->bottom
+
+    // Same ortho used in viewer.py 2D panel: x:[-3,3], z:[-6,1]
+    const x_m = -3.0 + (u * 6.0);
+    const z_m = 1.0 - (v * 7.0);
+    const dist = Math.sqrt((x_m * x_m) + (z_m * z_m));
+    const ang = (Math.atan2(-x_m, -z_m) * 180.0) / Math.PI;
+
+    hoverInfo.textContent = `dist=${dist.toFixed(2)}m  angle=${ang.toFixed(1)}deg  x=${x_m.toFixed(2)} z=${z_m.toFixed(2)}`;
+    hoverInfo.style.display = "block";
   }
 
   function flushPan() {
@@ -190,6 +258,7 @@ class WebFrameServer:
   });
 
   window.addEventListener("mousemove", (e) => {
+    update2DHover(e);
     if (!mouseDown) return;
     if (!dragging) return;
     const dx = e.clientX - lastX;
@@ -202,6 +271,10 @@ class WebFrameServer:
       panScheduled = true;
       setTimeout(flushPan, 30);
     }
+  });
+
+  stream.addEventListener("mouseleave", () => {
+    hoverInfo.style.display = "none";
   });
 
   stream.addEventListener("wheel", (e) => {

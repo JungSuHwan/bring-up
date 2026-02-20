@@ -10,7 +10,19 @@ STX = b'\x02'
 ETX = b'\x03'
 
 class LidarReceiver(threading.Thread):
-    def __init__(self, ip='192.168.0.31', port=8000, name='lidar', offset_x=-0.12, offset_y=0.0, offset_z=0.0, yaw_deg=0.0):
+    def __init__(
+        self,
+        ip='192.168.0.31',
+        port=8000,
+        name='lidar',
+        offset_x=-0.12,
+        offset_y=0.0,
+        offset_z=0.0,
+        yaw_deg=0.0,
+        alert_enabled=False,
+        alert_min_m=0.0,
+        alert_max_m=1.0,
+    ):
         super().__init__()
         self.ip = ip
         self.port = port
@@ -20,6 +32,7 @@ class LidarReceiver(threading.Thread):
         self.socket = None
         self.lock = threading.Lock()
         self.latest_points_3d = [] # List of [x, y, z]
+        self.latest_alert_points_3d = [] # Points within configured range threshold
         self.last_connect_log_time = 0.0
         self.last_frame_time = None
         self.frame_rate_hz = 0.0
@@ -30,6 +43,18 @@ class LidarReceiver(threading.Thread):
         self.offset_y = offset_y  # Down: Negative, Up: Positive
         self.offset_z = offset_z  # Forward: Negative, Backward: Positive (Default, can be changed)
         self.yaw_deg = yaw_deg
+        self.alert_enabled = bool(alert_enabled)
+        self.alert_min_m = float(alert_min_m)
+        self.alert_max_m = float(alert_max_m)
+
+    def set_alert_threshold(self, enabled=None, min_m=None, max_m=None):
+        with self.lock:
+            if enabled is not None:
+                self.alert_enabled = bool(enabled)
+            if min_m is not None:
+                self.alert_min_m = float(min_m)
+            if max_m is not None:
+                self.alert_max_m = float(max_m)
 
     def get_offset(self):
         with self.lock:
@@ -193,11 +218,15 @@ class LidarReceiver(threading.Thread):
             
             # Convert to 3D Points
             points = []
+            alert_points = []
             with self.lock:
                 off_x = float(self.offset_x)
                 off_y = float(self.offset_y)
                 off_z = float(self.offset_z)
                 yaw_rad = math.radians(float(self.yaw_deg))
+                alert_enabled = bool(self.alert_enabled)
+                alert_min = float(self.alert_min_m)
+                alert_max = float(self.alert_max_m)
             c = math.cos(yaw_rad)
             s = math.sin(yaw_rad)
             angle_curr = angle_begin
@@ -273,11 +302,17 @@ class LidarReceiver(threading.Thread):
                     points.append(x_gl) # x
                     points.append(y_gl) # y
                     points.append(z_gl) # z
+
+                    if alert_enabled and (alert_min <= r <= alert_max):
+                        alert_points.append(x_gl)
+                        alert_points.append(y_gl)
+                        alert_points.append(z_gl)
                     
                 angle_curr += angle_resol
                 
             with self.lock:
                 self.latest_points_3d = points # Flat list [x, y, z, x, y, z...] or simple list of lists
+                self.latest_alert_points_3d = alert_points
                 now = time.time()
                 if self.last_frame_time is not None:
                     dt = now - self.last_frame_time
@@ -297,11 +332,16 @@ class LidarReceiver(threading.Thread):
         with self.lock:
             return list(self.latest_points_3d) # Return copy
 
+    def get_latest_alert_points(self):
+        with self.lock:
+            return list(self.latest_alert_points_3d)
+
     def get_status(self):
         with self.lock:
             return {
                 "connected": self.connected,
                 "point_count": len(self.latest_points_3d) // 3,
+                "alert_point_count": len(self.latest_alert_points_3d) // 3,
                 "fps": float(self.frame_rate_hz),
                 "offset": {
                     "x": float(self.offset_x),
@@ -309,4 +349,9 @@ class LidarReceiver(threading.Thread):
                     "z": float(self.offset_z),
                 },
                 "yaw_deg": float(self.yaw_deg),
+                "alert_threshold": {
+                    "enabled": bool(self.alert_enabled),
+                    "min_m": float(self.alert_min_m),
+                    "max_m": float(self.alert_max_m),
+                },
             }

@@ -53,6 +53,17 @@ def load_web_options(config):
         "host": str(web_cfg.get("host", "0.0.0.0")),
         "port": int(web_cfg.get("port", 8080)),
         "fps": int(web_cfg.get("fps", 60)),
+        "optimize_for_web_only": bool(web_cfg.get("optimize_for_web_only", True)),
+        "jpeg_quality": int(web_cfg.get("jpeg_quality", 70)),
+    }
+
+
+def load_lidar_alert_options(config):
+    alert_cfg = config.get("lidar_2d_alert_threshold", {})
+    return {
+        "enabled": bool(alert_cfg.get("enabled", False)),
+        "min_m": float(alert_cfg.get("min_m", 0.0)),
+        "max_m": float(alert_cfg.get("max_m", 1.0)),
     }
 
 
@@ -65,6 +76,11 @@ def load_lidar_receivers(config_path, config=None):
         config = load_config_json(config_path)
 
     lidar_items = config.get("lidars", [])
+    alert_options = load_lidar_alert_options(config)
+    print(
+        f"[LiDAR] 2D alert threshold: enabled={alert_options['enabled']} "
+        f"range=[{alert_options['min_m']:.2f}, {alert_options['max_m']:.2f}] m"
+    )
     receivers = []
 
     for idx, item in enumerate(lidar_items):
@@ -90,6 +106,9 @@ def load_lidar_receivers(config_path, config=None):
             offset_y=offset_y,
             offset_z=offset_z,
             yaw_deg=yaw_deg,
+            alert_enabled=alert_options["enabled"],
+            alert_min_m=alert_options["min_m"],
+            alert_max_m=alert_options["max_m"],
         )
         receivers.append(receiver)
 
@@ -142,13 +161,20 @@ def main():
     web_host = args.web_host if args.web else web_options["host"]
     web_port = args.web_port if args.web else web_options["port"]
     web_fps = args.web_fps if args.web else web_options["fps"]
+    web_optimize_for_web_only = bool(web_options["optimize_for_web_only"])
+    web_jpeg_quality = int(web_options["jpeg_quality"])
+    config_path = os.path.abspath(args.lidar_config)
     profiles_path = os.path.abspath("lidar_profiles.json")
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
         "yaw_step_deg": 0.5,  # degree
     }
+    alert_ui_state = load_lidar_alert_options(config)
     profiles = {}
+    pending_config_save = False
+    last_config_save_time = 0.0
+    config_save_interval_sec = 0.5
 
     try:
         # 1. Initialize ZED
@@ -214,7 +240,12 @@ def main():
             True,
             show_window=pc_window_enabled,
         )
+        web_render_optimized = bool(web_enabled and (not pc_window_enabled) and web_optimize_for_web_only)
+        if web_render_optimized:
+            viewer.set_stream_3d_only(True)
         print(f"[Display] PC window enabled: {pc_window_enabled}")
+        if web_render_optimized:
+            print("[Display] Web-only optimization enabled: 3D-only render path")
 
         def get_selected_lidar():
             if not lidars:
@@ -234,6 +265,7 @@ def main():
                     "point_count": int(status.get("point_count", 0)),
                     "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                     "yaw_deg": float(status.get("yaw_deg", 0.0)),
+                    "alert_threshold": status.get("alert_threshold", {"enabled": False, "min_m": 0.0, "max_m": 1.0}),
                 })
             selected_name = None
             selected = get_selected_lidar()
@@ -243,6 +275,11 @@ def main():
                 "selected_name": selected_name,
                 "step": float(offset_ui_state["step"]),
                 "yaw_step_deg": float(offset_ui_state["yaw_step_deg"]),
+                "alert_threshold": {
+                    "enabled": bool(alert_ui_state["enabled"]),
+                    "min_m": float(alert_ui_state["min_m"]),
+                    "max_m": float(alert_ui_state["max_m"]),
+                },
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "lidars": items,
             }
@@ -272,6 +309,72 @@ def main():
                 return True
             except Exception as e:
                 print(f"[Profile] Failed to save {profiles_path}: {e}")
+                return False
+
+        def request_config_save():
+            nonlocal pending_config_save
+            pending_config_save = True
+
+        def persist_lidar_config():
+            nonlocal config
+            try:
+                # Reload current file to preserve unrelated sections edited externally.
+                disk_cfg = {}
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            disk_cfg = json.load(f)
+                            if not isinstance(disk_cfg, dict):
+                                disk_cfg = {}
+                    except Exception:
+                        disk_cfg = {}
+                if not disk_cfg:
+                    disk_cfg = config if isinstance(config, dict) else {}
+                if not isinstance(disk_cfg, dict):
+                    disk_cfg = {}
+
+                items = disk_cfg.get("lidars", [])
+                if not isinstance(items, list):
+                    items = []
+
+                for lidar in lidars:
+                    status = lidar.get_status()
+                    off = status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
+                    yaw_deg = float(status.get("yaw_deg", 0.0))
+
+                    entry = next((x for x in items if str(x.get("name", "")) == lidar.name), None)
+                    if entry is None:
+                        entry = {
+                            "name": lidar.name,
+                            "enabled": True,
+                            "ip": lidar.ip,
+                            "port": int(lidar.port),
+                        }
+                        items.append(entry)
+
+                    entry["offset"] = {
+                        "x": float(off.get("x", 0.0)),
+                        "y": float(off.get("y", 0.0)),
+                        "z": float(off.get("z", 0.0)),
+                    }
+                    rotation = entry.get("rotation", {})
+                    if not isinstance(rotation, dict):
+                        rotation = {}
+                    rotation["yaw_deg"] = yaw_deg
+                    entry["rotation"] = rotation
+
+                disk_cfg["lidars"] = items
+                disk_cfg["lidar_2d_alert_threshold"] = {
+                    "enabled": bool(alert_ui_state["enabled"]),
+                    "min_m": float(alert_ui_state["min_m"]),
+                    "max_m": float(alert_ui_state["max_m"]),
+                }
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(disk_cfg, f, indent=2)
+                config = disk_cfg
+                return True
+            except Exception as e:
+                print(f"[Config] Failed to save lidar config {config_path}: {e}")
                 return False
 
         def apply_offset_control(action, payload):
@@ -341,32 +444,64 @@ def main():
                     return False
                 print(f"[Adjust] preset={mode} step={offset_ui_state['step']:.3f}m yaw_step={offset_ui_state['yaw_step_deg']:.2f}deg")
                 return True
+            if action == "alert_threshold_set":
+                enabled = payload.get("enabled", alert_ui_state["enabled"])
+                min_m = float(payload.get("min_m", alert_ui_state["min_m"]))
+                max_m = float(payload.get("max_m", alert_ui_state["max_m"]))
+                if min_m > max_m:
+                    min_m, max_m = max_m, min_m
+                alert_ui_state["enabled"] = bool(enabled)
+                alert_ui_state["min_m"] = float(min_m)
+                alert_ui_state["max_m"] = float(max_m)
+                for lidar in lidars:
+                    lidar.set_alert_threshold(
+                        enabled=alert_ui_state["enabled"],
+                        min_m=alert_ui_state["min_m"],
+                        max_m=alert_ui_state["max_m"],
+                    )
+                request_config_save()
+                print(
+                    f"[Alert] threshold enabled={alert_ui_state['enabled']} "
+                    f"range=[{alert_ui_state['min_m']:.2f}, {alert_ui_state['max_m']:.2f}] m"
+                )
+                return True
 
             selected = get_selected_lidar()
             if selected is None:
                 return False
 
             step = float(offset_ui_state["step"])
+            changed_calib = False
             if action == "offset_x_minus":
                 selected.add_offset(dx=-step)
+                changed_calib = True
             elif action == "offset_x_plus":
                 selected.add_offset(dx=step)
+                changed_calib = True
             elif action == "offset_y_minus":
                 selected.add_offset(dy=-step)
+                changed_calib = True
             elif action == "offset_y_plus":
                 selected.add_offset(dy=step)
+                changed_calib = True
             elif action == "offset_z_minus":
                 selected.add_offset(dz=-step)
+                changed_calib = True
             elif action == "offset_z_plus":
                 selected.add_offset(dz=step)
+                changed_calib = True
             elif action == "reset_selected_lidar_offset":
                 selected.set_offset(x=0.0, y=0.0, z=0.0)
+                changed_calib = True
             elif action == "yaw_minus":
                 selected.add_yaw_deg(-float(offset_ui_state["yaw_step_deg"]))
+                changed_calib = True
             elif action == "yaw_plus":
                 selected.add_yaw_deg(float(offset_ui_state["yaw_step_deg"]))
+                changed_calib = True
             elif action == "reset_selected_lidar_yaw":
                 selected.set_yaw_deg(0.0)
+                changed_calib = True
             elif action == "lidar_offset_delta":
                 name = str(payload.get("name", ""))
                 axis = str(payload.get("axis", "")).lower()
@@ -382,6 +517,7 @@ def main():
                     target.add_offset(dz=delta)
                 else:
                     return False
+                request_config_save()
                 return True
             elif action == "lidar_offset_set":
                 name = str(payload.get("name", ""))
@@ -393,6 +529,7 @@ def main():
                     y=payload.get("y", None),
                     z=payload.get("z", None),
                 )
+                request_config_save()
                 return True
             elif action == "lidar_yaw_delta":
                 name = str(payload.get("name", ""))
@@ -401,6 +538,7 @@ def main():
                 if target is None:
                     return False
                 target.add_yaw_deg(delta)
+                request_config_save()
                 return True
             elif action == "lidar_yaw_set":
                 name = str(payload.get("name", ""))
@@ -409,6 +547,7 @@ def main():
                 if target is None:
                     return False
                 target.set_yaw_deg(yaw_deg)
+                request_config_save()
                 return True
             elif action == "lidar_axis_drag":
                 name = str(payload.get("name", ""))
@@ -430,6 +569,7 @@ def main():
                     target.add_offset(dz=pixels * float(offset_ui_state["step"]) * step_scale)
                 else:
                     return False
+                request_config_save()
                 return True
             elif action == "profile_save":
                 name = str(payload.get("name", "")).strip()
@@ -482,6 +622,8 @@ def main():
             else:
                 return False
 
+            if changed_calib:
+                request_config_save()
             off = selected.get_offset()
             yaw = selected.get_yaw_deg()
             print(f"[Offset] {selected.name} -> x={off['x']:+.3f}, y={off['y']:+.3f}, z={off['z']:+.3f}, yaw={yaw:+.2f}deg (step={step:.3f}m/{offset_ui_state['yaw_step_deg']:.2f}deg)")
@@ -519,15 +661,13 @@ def main():
 
             server.set_control_callback(on_web_control)
             server.set_state_callback(get_runtime_lidar_state)
-            server.set_jpeg_quality(70)
+            server.set_jpeg_quality(web_jpeg_quality)
             server.start()
             viewer.set_frame_callback(server.update_frame, fps=web_fps)
             print(f"[Web] Stream bind: {web_host}:{web_port} (fps={web_fps})")
             print(f"[Web] Open on this PC: http://localhost:{web_port}/")
         
         print("\n=== Controls ===")
-        print("  [Space] : Pause/Resume Spatial Mapping")
-        print("  [LMB Drag on 3D view] : Pan merged map")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan (viewer window)")
         print("  [External UI/API] Use /control for x/y/z/yaw/step realtime control")
@@ -563,9 +703,14 @@ def main():
                     pass
 
             if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+                if pending_config_save and (time.time() - last_config_save_time) >= config_save_interval_sec:
+                    if persist_lidar_config():
+                        pending_config_save = False
+                        last_config_save_time = time.time()
                 
                 # (A) ZED Data
-                zed.retrieve_image(image, sl.VIEW.LEFT)
+                if not web_render_optimized:
+                    zed.retrieve_image(image, sl.VIEW.LEFT)
                 tracking_state = zed.get_position(pose)
                 mapping_state = zed.get_spatial_mapping_state()
                 
@@ -583,10 +728,12 @@ def main():
                 lidar_frames = []
                 for lidar in lidars:
                     pts = lidar.get_latest_points()
+                    alert_pts = lidar.get_latest_alert_points()
                     status = lidar.get_status()
                     lidar_frames.append({
                         "name": lidar.name,
                         "points": pts if pts else [],
+                        "alert_points": alert_pts if alert_pts else [],
                         "connected": status.get("connected", False),
                         "fps": status.get("fps", 0.0),
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
@@ -596,7 +743,7 @@ def main():
                 viewer.update_lidar_multi(lidar_frames)
                     
                 # (D) Update View
-                viewer.update_view(image, None, pose.pose_data(), tracking_state, mapping_state)
+                viewer.update_view(image if not web_render_optimized else None, None, pose.pose_data(), tracking_state, mapping_state)
 
                 # When PC window is hidden, force one render pass so web stream receives
                 # the merged OpenGL frame (RGB + mesh + lidar) instead of raw camera image.
@@ -609,6 +756,8 @@ def main():
         print("\n[System] KeyboardInterrupt received -> exiting")
     finally:
         print("Exiting...")
+        if pending_config_save:
+            persist_lidar_config()
         for lidar in lidars:
             lidar.stop()
         for lidar in lidars:

@@ -57,6 +57,7 @@
         <label for="lidarSel">LiDAR</label>
         <select id="lidarSel"></select>
         <button id="refreshBtn" type="button">Refresh</button>
+        <button id="resetPanBtn" type="button">Reset Pan</button>
       </div>
     </div>
 
@@ -68,6 +69,14 @@
         <label for="yawStepInput">Yaw step (deg)</label>
         <input id="yawStepInput" type="number" min="0.1" max="20" step="0.1" value="0.5" />
         <button id="applyYawStepBtn" type="button">Apply Yaw Step</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <label><input id="alertEnabled" type="checkbox" /> 2D Alert Enabled</label>
+        <label for="alertMinInput">Alert Min (m)</label>
+        <input id="alertMinInput" type="number" min="0" max="100" step="0.01" value="0.0" />
+        <label for="alertMaxInput">Alert Max (m)</label>
+        <input id="alertMaxInput" type="number" min="0" max="100" step="0.01" value="1.5" />
+        <button id="applyAlertBtn" type="button">Apply Alert Threshold</button>
       </div>
     </div>
 
@@ -118,7 +127,14 @@
     const yInput = $("yInput");
     const zInput = $("zInput");
     const yawInput = $("yawInput");
+    const alertEnabled = $("alertEnabled");
+    const alertMinInput = $("alertMinInput");
+    const alertMaxInput = $("alertMaxInput");
     let lastState = {};
+
+    function isFieldEditing(el) {
+      return document.activeElement === el;
+    }
 
     async function apiControl(action, payload = {}) {
       const res = await fetch("/control", {
@@ -148,16 +164,20 @@
         if (prev && lidars.some((l) => l.name === prev)) lidarSel.value = prev;
         else if (data.selected_name) lidarSel.value = data.selected_name;
 
-        if (typeof data.step === "number") stepInput.value = data.step.toFixed(3);
-        if (typeof data.yaw_step_deg === "number") yawStepInput.value = data.yaw_step_deg.toFixed(2);
+        if (typeof data.step === "number" && !isFieldEditing(stepInput)) stepInput.value = data.step.toFixed(3);
+        if (typeof data.yaw_step_deg === "number" && !isFieldEditing(yawStepInput)) yawStepInput.value = data.yaw_step_deg.toFixed(2);
+        const at = data.alert_threshold || {};
+        if (document.activeElement !== alertEnabled) alertEnabled.checked = !!at.enabled;
+        if (!isFieldEditing(alertMinInput) && typeof at.min_m === "number") alertMinInput.value = Number(at.min_m).toFixed(2);
+        if (!isFieldEditing(alertMaxInput) && typeof at.max_m === "number") alertMaxInput.value = Number(at.max_m).toFixed(2);
 
         const selected = lidars.find((l) => l.name === lidarSel.value) || lidars[0];
         if (selected) {
           const off = selected.offset || { x: 0, y: 0, z: 0 };
-          xInput.value = Number(off.x || 0).toFixed(3);
-          yInput.value = Number(off.y || 0).toFixed(3);
-          zInput.value = Number(off.z || 0).toFixed(3);
-          yawInput.value = Number(selected.yaw_deg || 0).toFixed(2);
+          if (!isFieldEditing(xInput)) xInput.value = Number(off.x || 0).toFixed(3);
+          if (!isFieldEditing(yInput)) yInput.value = Number(off.y || 0).toFixed(3);
+          if (!isFieldEditing(zInput)) zInput.value = Number(off.z || 0).toFixed(3);
+          if (!isFieldEditing(yawInput)) yawInput.value = Number(selected.yaw_deg || 0).toFixed(2);
           statusEl.textContent = `connected | lidar=${selected.name} | up=${!!selected.connected} | fps=${Number(selected.fps || 0).toFixed(1)}`;
         } else {
           statusEl.textContent = "connected | no lidar";
@@ -174,7 +194,9 @@
     async function setAxis(axis, value) {
       const name = selectedName();
       if (!name) return;
-      await apiControl("lidar_offset_set", { name, [axis]: Number(value) });
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return;
+      await apiControl("lidar_offset_set", { name, [axis]: parsed });
       await refreshState();
     }
 
@@ -189,7 +211,9 @@
     async function setYaw(value) {
       const name = selectedName();
       if (!name) return;
-      await apiControl("lidar_yaw_set", { name, yaw_deg: Number(value) });
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return;
+      await apiControl("lidar_yaw_set", { name, yaw_deg: parsed });
       await refreshState();
     }
 
@@ -202,12 +226,24 @@
     }
 
     $("refreshBtn").addEventListener("click", refreshState);
+    $("resetPanBtn").addEventListener("click", async () => {
+      await apiControl("reset_view", {});
+      await refreshState();
+    });
     $("applyStepBtn").addEventListener("click", async () => {
       await apiControl("offset_set_step", { step: Number(stepInput.value || 0.01) });
       await refreshState();
     });
     $("applyYawStepBtn").addEventListener("click", async () => {
       await apiControl("yaw_set_step", { yaw_step_deg: Number(yawStepInput.value || 0.5) });
+      await refreshState();
+    });
+    $("applyAlertBtn").addEventListener("click", async () => {
+      await apiControl("alert_threshold_set", {
+        enabled: !!alertEnabled.checked,
+        min_m: Number(alertMinInput.value || 0),
+        max_m: Number(alertMaxInput.value || 0),
+      });
       await refreshState();
     });
 
