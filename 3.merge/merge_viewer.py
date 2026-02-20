@@ -210,6 +210,7 @@ def main():
         print("\n=== Controls ===")
         print("  [Space] : Pause/Resume Spatial Mapping")
         print("  [LMB Drag on 3D view] : Pan merged map")
+        print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan")
         print("  [Esc/Q] : Quit")
         

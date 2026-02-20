@@ -300,6 +300,7 @@ class GLViewer:
         ]
         self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.pan_sensitivity = 0.005  # meter / pixel
+        self.zoom_sensitivity = 0.20  # meter / wheel step
         self.drag_active = False
         self.last_mouse_x = 0
         self.last_mouse_y = 0
@@ -356,6 +357,11 @@ class GLViewer:
         glutKeyboardUpFunc(self.keyReleasedCallback)
         glutMouseFunc(self.mouse_button_callback)
         glutMotionFunc(self.mouse_motion_callback)
+        if hasattr(sys.modules[__name__], "glutMouseWheelFunc"):
+            try:
+                glutMouseWheelFunc(self.mouse_wheel_callback)
+            except Exception:
+                pass
 
         # Register the closing function
         glutCloseFunc(self.close_func)
@@ -514,6 +520,15 @@ class GLViewer:
         return mouse_x >= left_w
 
     def mouse_button_callback(self, button, state, x, y):
+        # FreeGLUT commonly reports wheel as mouse buttons 3(up) / 4(down).
+        if state == GLUT_DOWN and self._is_in_3d_viewport(x):
+            if button == 3:
+                self.pan_offset[2] += self.zoom_sensitivity
+                return
+            if button == 4:
+                self.pan_offset[2] -= self.zoom_sensitivity
+                return
+
         if button == GLUT_LEFT_BUTTON:
             if state == GLUT_DOWN and self._is_in_3d_viewport(x):
                 self.drag_active = True
@@ -521,6 +536,14 @@ class GLViewer:
                 self.last_mouse_y = y
             elif state == GLUT_UP:
                 self.drag_active = False
+
+    def mouse_wheel_callback(self, wheel, direction, x, y):
+        if not self._is_in_3d_viewport(x):
+            return
+        if direction > 0:
+            self.pan_offset[2] += self.zoom_sensitivity
+        elif direction < 0:
+            self.pan_offset[2] -= self.zoom_sensitivity
 
     def mouse_motion_callback(self, x, y):
         if not self.drag_active:
@@ -766,7 +789,7 @@ class GLViewer:
                 glColor3f(0.25, 0.25, 0.25)
                 self.print_GL(-0.95, 0.9, "Hit Space Bar to stop spatial mapping.")
             glColor3f(0.65, 0.65, 0.65)
-            self.print_GL(-0.95, 0.97, "Drag(LMB): Pan map / R: Reset pan")
+            self.print_GL(-0.95, 0.97, "Drag(LMB): Pan / Wheel: Zoom / R: Reset")
 
             positional_tracking_state_str = "POSITIONAL TRACKING STATE : "
             spatial_mapping_state_str = "SPATIAL MAPPING STATE : "
