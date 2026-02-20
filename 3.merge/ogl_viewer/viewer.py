@@ -296,12 +296,7 @@ class GLViewer:
         self.lidar_order = []
         self.lidar_status = {}
         self.lidar_palette = [
-            [1.00, 0.25, 0.25],  # red
-            [0.20, 0.85, 1.00],  # cyan
-            [0.95, 0.90, 0.20],  # yellow
-            [0.35, 1.00, 0.35],  # green
-            [1.00, 0.55, 0.15],  # orange
-            [0.85, 0.35, 1.00],  # magenta
+            [1.00, 0.00, 0.00],  # red (all lidars use red)
         ]
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 

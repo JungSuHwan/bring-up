@@ -100,6 +100,28 @@ def load_lidar_receivers(config_path, config=None):
     return receivers
 
 
+def reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params):
+    # Follow ZED spatial mapping sample reset flow:
+    # reset tracking pose + clear current mesh buffers + enable mapping again.
+    try:
+        zed.disable_spatial_mapping()
+    except Exception:
+        pass
+
+    init_pose = sl.Transform()
+    init_pose.set_identity()
+    zed.reset_positional_tracking(init_pose)
+
+    if pymesh is not None:
+        pymesh.clear()
+    if viewer is not None:
+        viewer.clear_current_mesh()
+
+    err = zed.enable_spatial_mapping(mapping_params)
+    if err != sl.ERROR_CODE.SUCCESS:
+        raise RuntimeError(f"Enable spatial mapping failed after reset: {err}")
+
+
 def main():
     args = parse_args()
     server = None
@@ -136,6 +158,7 @@ def main():
         # 2. Enable Tracking & Mapping
         print("Enabling Tracking and Spatial Mapping...")
         tracking_params = sl.PositionalTrackingParameters()
+        tracking_params.enable_area_memory = False
         
         # Set initial position (Camera at 30cm height)
         initial_position = sl.Transform()
@@ -144,7 +167,10 @@ def main():
         initial_position.set_translation(initial_translation)
         tracking_params.set_initial_world_transform(initial_position)
         
-        zed.enable_positional_tracking(tracking_params)
+        tracking_err = zed.enable_positional_tracking(tracking_params)
+        if tracking_err != sl.ERROR_CODE.SUCCESS:
+            print(f"Enable positional tracking failed: {tracking_err}")
+            return
         
         mapping_params = sl.SpatialMappingParameters()
         mapping_params.map_type = sl.SPATIAL_MAP_TYPE.MESH
@@ -152,7 +178,6 @@ def main():
         mapping_params.resolution_meter = mapping_params.get_resolution_preset(sl.MAPPING_RESOLUTION.MEDIUM)
         mapping_params.range_meter = mapping_params.get_range_preset(sl.MAPPING_RANGE.MEDIUM)
         mapping_params.use_chunk_only = True
-        zed.enable_spatial_mapping(mapping_params)
         
         # 3. Start LiDAR Threads
         lidars = load_lidar_receivers(args.lidar_config, config=config)
@@ -171,6 +196,9 @@ def main():
             show_window=pc_window_enabled,
         )
         print(f"[Display] PC window enabled: {pc_window_enabled}")
+
+        reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params)
+        print("[ZED] Spatial mapping session reset complete (fresh start).")
 
         if web_enabled:
             server = web_stream.WebFrameServer(host=web_host, port=web_port)
