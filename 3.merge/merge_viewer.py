@@ -1,12 +1,26 @@
 import sys
 import time
 import signal
+import argparse
 import numpy as np
 import pyzed.sl as sl
 import ogl_viewer.viewer as gl
 import lidar_thread
+import web_stream
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="ZED + LiDAR merge viewer")
+    parser.add_argument("--web", action="store_true", help="Enable web streaming")
+    parser.add_argument("--web-host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
+    parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default: 8080)")
+    parser.add_argument("--web-fps", type=int, default=5, help="Web stream capture FPS (default: 5)")
+    return parser.parse_args()
+
 
 def main():
+    args = parse_args()
+    server = None
+
     # 1. Initialize ZED
     print("Initializing ZED Camera...")
     init = sl.InitParameters()
@@ -52,6 +66,12 @@ def main():
     viewer = gl.GLViewer()
     pymesh = sl.Mesh()
     viewer.init(camera_info.camera_configuration.calibration_parameters.left_cam, pymesh, True)
+
+    if args.web:
+        server = web_stream.WebFrameServer(host=args.web_host, port=args.web_port)
+        server.start()
+        viewer.set_frame_callback(server.update_frame, fps=args.web_fps)
+        print(f"[Web] Stream URL: http://{args.web_host}:{args.web_port}/")
     
     print("\n=== Controls ===")
     print("  [Space] : Pause/Resume Spatial Mapping")
@@ -101,6 +121,9 @@ def main():
     print("Exiting...")
     lidar.stop()
     lidar.join()
+
+    if server is not None:
+        server.stop()
     
     image.free(memory_type=sl.MEM.CPU)
     pymesh.clear()

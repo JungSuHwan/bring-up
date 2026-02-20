@@ -8,6 +8,7 @@ import sys
 import array
 import math
 import ctypes
+import time
 import pyzed.sl as sl
 
 M_PI = 3.1415926
@@ -288,6 +289,9 @@ class GLViewer:
         self.pose = sl.Transform().set_identity()
         self.tracking_state = sl.POSITIONAL_TRACKING_STATE.OFF
         self.mapping_state = sl.SPATIAL_MAPPING_STATE.NOT_ENABLED
+        self.frame_callback = None
+        self.frame_interval_sec = 0.2
+        self.last_frame_capture_time = 0.0
 
     def init(self, _params, _mesh, _create_mesh): 
         glutInit()
@@ -418,6 +422,13 @@ class GLViewer:
         copy_state = self.change_state
         self.change_state = False
         return copy_state
+
+    def set_frame_callback(self, callback, fps=5):
+        self.frame_callback = callback
+        if fps and fps > 0:
+            self.frame_interval_sec = 1.0 / float(fps)
+        else:
+            self.frame_interval_sec = 0.2
 
     def idle(self):
         if self.available:
@@ -560,6 +571,24 @@ class GLViewer:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
             self.print_text(left_w, wnd_h)
+
+            # Optional frame callback for web streaming.
+            if self.frame_callback:
+                now = time.time()
+                if (now - self.last_frame_capture_time) >= self.frame_interval_sec:
+                    try:
+                        full_w = glutGet(GLUT_WINDOW_WIDTH)
+                        full_h = glutGet(GLUT_WINDOW_HEIGHT)
+                        glPixelStorei(GL_PACK_ALIGNMENT, 1)
+                        pixel_bytes = glReadPixels(0, 0, full_w, full_h, GL_RGB, GL_UNSIGNED_BYTE)
+                        if pixel_bytes is not None:
+                            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape(full_h, full_w, 3)
+                            frame = np.flipud(frame)
+                            self.frame_callback(frame)
+                            self.last_frame_capture_time = now
+                    except Exception:
+                        pass
+
             self.mutex.release()  
 
             glutSwapBuffers()
