@@ -298,6 +298,11 @@ class GLViewer:
         self.lidar_palette = [
             [1.00, 0.00, 0.00],  # red (all lidars use red)
         ]
+        self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.pan_sensitivity = 0.005  # meter / pixel
+        self.drag_active = False
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
@@ -349,6 +354,8 @@ class GLViewer:
         glutIdleFunc(self.idle)   
 
         glutKeyboardUpFunc(self.keyReleasedCallback)
+        glutMouseFunc(self.mouse_button_callback)
+        glutMotionFunc(self.mouse_motion_callback)
 
         # Register the closing function
         glutCloseFunc(self.close_func)
@@ -498,6 +505,34 @@ class GLViewer:
             self.close_func()
         if  ord(key) == 32:                     # space bar
             self.change_state = True
+        if ord(key) == 114:                     # 'r' key
+            self.pan_offset[:] = 0.0
+
+    def _is_in_3d_viewport(self, mouse_x):
+        wnd_w = glutGet(GLUT_WINDOW_WIDTH)
+        left_w = int(wnd_w / 3)
+        return mouse_x >= left_w
+
+    def mouse_button_callback(self, button, state, x, y):
+        if button == GLUT_LEFT_BUTTON:
+            if state == GLUT_DOWN and self._is_in_3d_viewport(x):
+                self.drag_active = True
+                self.last_mouse_x = x
+                self.last_mouse_y = y
+            elif state == GLUT_UP:
+                self.drag_active = False
+
+    def mouse_motion_callback(self, x, y):
+        if not self.drag_active:
+            return
+
+        dx = x - self.last_mouse_x
+        dy = y - self.last_mouse_y
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+
+        self.pan_offset[0] += dx * self.pan_sensitivity
+        self.pan_offset[1] -= dy * self.pan_sensitivity
 
     def draw_callback(self):
         if self.available:
@@ -682,8 +717,12 @@ class GLViewer:
                 # Send the projection and the Pose to the GLSL shader to make the projection of the 2D image
                 tmp = self.pose
                 tmp.inverse()
-                proj = (self.projection * tmp).m
-                vpMat = proj.flatten()
+                view_np = np.array(tmp.m, dtype=np.float32)
+                pan_mat = np.identity(4, dtype=np.float32)
+                pan_mat[0, 3] = float(self.pan_offset[0])
+                pan_mat[1, 3] = float(self.pan_offset[1])
+                pan_mat[2, 3] = float(self.pan_offset[2])
+                vpMat = np.dot(np.array(self.projection.m, dtype=np.float32), np.dot(pan_mat, view_np)).flatten()
                 
                 glUseProgram(self.shader_image.get_program_id())
                 glUniformMatrix4fv(self.shader_MVP, 1, GL_TRUE, (GLfloat * len(vpMat))(*vpMat))
@@ -697,8 +736,8 @@ class GLViewer:
                 # Draw Lidar Points
                 # Reuse same projection matrix logic
                 glPointSize(5.0) # Make them visible
-                # Use Camera Projection ONLY (Points are in Camera Frame)
-                projMatData = self.projection.m.flatten()
+                # Apply same pan in camera/view space for visual consistency with mesh.
+                projMatData = np.dot(np.array(self.projection.m, dtype=np.float32), pan_mat).flatten()
                 for name in self.lidar_order:
                     self.lidar_handlers[name].draw(projMatData)
                 
@@ -726,6 +765,8 @@ class GLViewer:
             else:
                 glColor3f(0.25, 0.25, 0.25)
                 self.print_GL(-0.95, 0.9, "Hit Space Bar to stop spatial mapping.")
+            glColor3f(0.65, 0.65, 0.65)
+            self.print_GL(-0.95, 0.97, "Drag(LMB): Pan map / R: Reset pan")
 
             positional_tracking_state_str = "POSITIONAL TRACKING STATE : "
             spatial_mapping_state_str = "SPATIAL MAPPING STATE : "
