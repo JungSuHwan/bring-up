@@ -202,6 +202,24 @@ def main():
 
         if web_enabled:
             server = web_stream.WebFrameServer(host=web_host, port=web_port)
+            def on_web_control(action, payload):
+                if viewer is None:
+                    return False
+                if action == "pan_pixels":
+                    dx = float(payload.get("dx", 0.0))
+                    dy = float(payload.get("dy", 0.0))
+                    viewer.pan_by_pixels(dx, dy)
+                    return True
+                if action == "zoom_steps":
+                    steps = float(payload.get("steps", 0.0))
+                    viewer.zoom_by_steps(steps)
+                    return True
+                if action == "reset_view":
+                    viewer.reset_pan_zoom()
+                    return True
+                return False
+
+            server.set_control_callback(on_web_control)
             server.start()
             viewer.set_frame_callback(server.update_frame, fps=web_fps)
             print(f"[Web] Stream bind: {web_host}:{web_port} (fps={web_fps})")

@@ -512,6 +512,19 @@ class GLViewer:
         if  ord(key) == 32:                     # space bar
             self.change_state = True
         if ord(key) == 114:                     # 'r' key
+            self.reset_pan_zoom()
+
+    def pan_by_pixels(self, dx, dy):
+        with self.mutex:
+            self.pan_offset[0] += float(dx) * self.pan_sensitivity
+            self.pan_offset[1] -= float(dy) * self.pan_sensitivity
+
+    def zoom_by_steps(self, steps):
+        with self.mutex:
+            self.pan_offset[2] += float(steps) * self.zoom_sensitivity
+
+    def reset_pan_zoom(self):
+        with self.mutex:
             self.pan_offset[:] = 0.0
 
     def _is_in_3d_viewport(self, mouse_x):
@@ -523,10 +536,10 @@ class GLViewer:
         # FreeGLUT commonly reports wheel as mouse buttons 3(up) / 4(down).
         if state == GLUT_DOWN and self._is_in_3d_viewport(x):
             if button == 3:
-                self.pan_offset[2] += self.zoom_sensitivity
+                self.zoom_by_steps(1.0)
                 return
             if button == 4:
-                self.pan_offset[2] -= self.zoom_sensitivity
+                self.zoom_by_steps(-1.0)
                 return
 
         if button == GLUT_LEFT_BUTTON:
@@ -541,9 +554,9 @@ class GLViewer:
         if not self._is_in_3d_viewport(x):
             return
         if direction > 0:
-            self.pan_offset[2] += self.zoom_sensitivity
+            self.zoom_by_steps(1.0)
         elif direction < 0:
-            self.pan_offset[2] -= self.zoom_sensitivity
+            self.zoom_by_steps(-1.0)
 
     def mouse_motion_callback(self, x, y):
         if not self.drag_active:
@@ -554,8 +567,7 @@ class GLViewer:
         self.last_mouse_x = x
         self.last_mouse_y = y
 
-        self.pan_offset[0] += dx * self.pan_sensitivity
-        self.pan_offset[1] -= dy * self.pan_sensitivity
+        self.pan_by_pixels(dx, dy)
 
     def draw_callback(self):
         if self.available:

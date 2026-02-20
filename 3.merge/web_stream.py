@@ -3,7 +3,7 @@ import time
 
 import cv2
 import numpy as np
-from flask import Flask, Response
+from flask import Flask, Response, jsonify, request
 from werkzeug.serving import make_server
 
 
@@ -17,6 +17,7 @@ class WebFrameServer:
         self._running = False
         self._jpeg_lock = threading.Lock()
         self._latest_jpeg = None
+        self._control_callback = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -32,14 +33,92 @@ class WebFrameServer:
   <style>
     body { margin: 0; background: #111; color: #ddd; font-family: Arial, sans-serif; }
     .wrap { padding: 10px; }
-    img { width: 100%; height: auto; border: 1px solid #333; }
+    img { width: 100%; height: auto; border: 1px solid #333; user-select: none; -webkit-user-drag: none; touch-action: none; }
+    .hint { margin: 8px 0 0; color: #aaa; font-size: 14px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    button { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 6px 10px; cursor: pointer; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h3>LiDAR + ZED Merge Stream</h3>
-    <img src="/stream.mjpg" alt="stream" />
+    <div class="row">
+      <button id="resetBtn" type="button">Reset View (R)</button>
+    </div>
+    <img id="stream" src="/stream.mjpg" alt="stream" />
+    <p class="hint">Right 3D panel only: drag to pan, wheel to zoom.</p>
   </div>
+<script>
+(() => {
+  const stream = document.getElementById("stream");
+  const resetBtn = document.getElementById("resetBtn");
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  let pendingDx = 0;
+  let pendingDy = 0;
+  let panScheduled = false;
+
+  function sendControl(payload) {
+    fetch("/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true
+    }).catch(() => {});
+  }
+
+  function in3DPanel(offsetX, width) {
+    return offsetX >= (width / 3);
+  }
+
+  function flushPan() {
+    panScheduled = false;
+    if (pendingDx === 0 && pendingDy === 0) return;
+    sendControl({ action: "pan_pixels", dx: pendingDx, dy: pendingDy });
+    pendingDx = 0;
+    pendingDy = 0;
+  }
+
+  stream.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (!in3DPanel(e.offsetX, stream.clientWidth)) return;
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    e.preventDefault();
+  });
+
+  window.addEventListener("mouseup", () => {
+    dragging = false;
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    pendingDx += dx;
+    pendingDy += dy;
+    if (!panScheduled) {
+      panScheduled = true;
+      setTimeout(flushPan, 30);
+    }
+  });
+
+  stream.addEventListener("wheel", (e) => {
+    if (!in3DPanel(e.offsetX, stream.clientWidth)) return;
+    const steps = e.deltaY < 0 ? 1 : -1;
+    sendControl({ action: "zoom_steps", steps });
+    e.preventDefault();
+  }, { passive: false });
+
+  resetBtn.addEventListener("click", () => {
+    sendControl({ action: "reset_view" });
+  });
+})();
+</script>
 </body>
 </html>
 """
@@ -50,6 +129,18 @@ class WebFrameServer:
                 self._mjpeg_generator(),
                 mimetype="multipart/x-mixed-replace; boundary=frame",
             )
+
+        @self._app.route("/control", methods=["POST"])
+        def control():
+            if self._control_callback is None:
+                return jsonify({"ok": False, "error": "control callback not set"}), 503
+            payload = request.get_json(silent=True) or {}
+            action = str(payload.get("action", ""))
+            try:
+                accepted = bool(self._control_callback(action, payload))
+                return jsonify({"ok": accepted})
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)}), 500
 
     def _mjpeg_generator(self):
         while self._running:
@@ -92,6 +183,9 @@ class WebFrameServer:
         except Exception:
             # Keep rendering loop stable even if encoding fails temporarily.
             pass
+
+    def set_control_callback(self, callback):
+        self._control_callback = callback
 
     def start(self):
         if self._running:
