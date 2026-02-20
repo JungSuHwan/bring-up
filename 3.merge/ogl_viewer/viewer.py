@@ -870,18 +870,15 @@ class GLViewer:
                 glUseProgram(0)
                 
                 # Draw Lidar Points
-                # Reuse same projection matrix logic
                 glPointSize(5.0) # Make them visible
-                # Apply same pan in camera/view space for visual consistency with mesh.
-                projMatData = np.dot(np.array(self.projection.m, dtype=np.float32), pan_mat).flatten()
                 for name in self.lidar_order:
                     # Keep per-lidar color consistent with 2D view.
-                    self.lidar_handlers[name].draw(projMatData)
+                    self.lidar_handlers[name].draw(vpMat)
                 # Overlay threshold-hit points in red.
                 glPointSize(7.0)
                 for name in self.lidar_order:
                     if name in self.lidar_alert_handlers:
-                        self.lidar_alert_handlers[name].draw(projMatData)
+                        self.lidar_alert_handlers[name].draw(vpMat)
                 
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
