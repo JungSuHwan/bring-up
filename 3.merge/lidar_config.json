@@ -11,22 +11,22 @@
   "lidars": [
     {
       "name": "lidar_31",
-      "enabled": false,
+      "enabled": true,
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
-        "x": -0.12,
+        "x": 0.0,
         "y": 0.0,
         "z": 0.0
       }
     },
     {
       "name": "lidar_41",
-      "enabled": true,
+      "enabled": false,
       "ip": "192.168.0.41",
       "port": 8000,
       "offset": {
-        "x": -0.2,
+        "x": 0.0,
         "y": 0.0,
         "z": 0.0
       }

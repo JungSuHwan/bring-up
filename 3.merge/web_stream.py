@@ -18,6 +18,7 @@ class WebFrameServer:
         self._jpeg_lock = threading.Lock()
         self._latest_jpeg = None
         self._control_callback = None
+        self._state_callback = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -36,7 +37,11 @@ class WebFrameServer:
     img { width: 100%; height: auto; border: 1px solid #333; user-select: none; -webkit-user-drag: none; touch-action: none; }
     .hint { margin: 8px 0 0; color: #aaa; font-size: 14px; }
     .row { display: flex; gap: 8px; align-items: center; }
+    .controls { margin-top: 10px; padding: 10px; border: 1px solid #333; background: #161616; }
+    .group { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     button { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 6px 10px; cursor: pointer; }
+    input, select { background: #222; color: #ddd; border: 1px solid #444; padding: 6px; }
+    .status { font-size: 13px; color: #bbb; }
   </style>
 </head>
 <body>
@@ -47,11 +52,35 @@ class WebFrameServer:
     </div>
     <img id="stream" src="/stream.mjpg" alt="stream" />
     <p class="hint">Right 3D panel only: drag to pan, wheel to zoom.</p>
+    <div class="controls">
+      <div class="group">
+        <label for="lidarSel">LiDAR</label>
+        <select id="lidarSel"></select>
+        <label for="stepInput">Step(m)</label>
+        <input id="stepInput" type="number" min="0.001" max="1" step="0.001" value="0.01" />
+        <button id="stepApply" type="button">Apply Step</button>
+      </div>
+      <div class="group">
+        <button data-axis="x" data-sign="-1" type="button">X-</button>
+        <button data-axis="x" data-sign="1" type="button">X+</button>
+        <button data-axis="y" data-sign="-1" type="button">Y-</button>
+        <button data-axis="y" data-sign="1" type="button">Y+</button>
+        <button data-axis="z" data-sign="-1" type="button">Z-</button>
+        <button data-axis="z" data-sign="1" type="button">Z+</button>
+        <button id="offsetReset" type="button">Reset Offset</button>
+      </div>
+      <div id="lidarStatus" class="status"></div>
+    </div>
   </div>
 <script>
 (() => {
   const stream = document.getElementById("stream");
   const resetBtn = document.getElementById("resetBtn");
+  const lidarSel = document.getElementById("lidarSel");
+  const stepInput = document.getElementById("stepInput");
+  const stepApply = document.getElementById("stepApply");
+  const offsetReset = document.getElementById("offsetReset");
+  const lidarStatus = document.getElementById("lidarStatus");
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
@@ -66,6 +95,38 @@ class WebFrameServer:
       body: JSON.stringify(payload),
       keepalive: true
     }).catch(() => {});
+  }
+
+  function selectedLidarName() {
+    return lidarSel.value || "";
+  }
+
+  async function refreshLidarState() {
+    try {
+      const res = await fetch("/lidar_state", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const lidars = Array.isArray(data.lidars) ? data.lidars : [];
+      const prev = selectedLidarName();
+      lidarSel.innerHTML = "";
+      for (const l of lidars) {
+        const opt = document.createElement("option");
+        opt.value = l.name;
+        opt.textContent = l.name;
+        lidarSel.appendChild(opt);
+      }
+      const pick = data.selected_name || prev;
+      if (pick) lidarSel.value = pick;
+      if (typeof data.step === "number") stepInput.value = data.step.toFixed(3);
+
+      const chosen = lidars.find((l) => l.name === selectedLidarName()) || lidars[0];
+      if (chosen && chosen.offset) {
+        const o = chosen.offset;
+        lidarStatus.textContent = `${chosen.name}: pts=${chosen.point_count} fps=${Number(chosen.fps || 0).toFixed(1)} off=(${Number(o.x).toFixed(3)}, ${Number(o.y).toFixed(3)}, ${Number(o.z).toFixed(3)})`;
+      } else {
+        lidarStatus.textContent = "No LiDAR info";
+      }
+    } catch (_) {}
   }
 
   function in3DPanel(offsetX, width) {
@@ -117,6 +178,33 @@ class WebFrameServer:
   resetBtn.addEventListener("click", () => {
     sendControl({ action: "reset_view" });
   });
+
+  stepApply.addEventListener("click", () => {
+    const step = Number(stepInput.value || 0.01);
+    sendControl({ action: "offset_set_step", step });
+  });
+
+  document.querySelectorAll("button[data-axis]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const axis = btn.getAttribute("data-axis");
+      const sign = Number(btn.getAttribute("data-sign") || "1");
+      const step = Number(stepInput.value || 0.01);
+      const name = selectedLidarName();
+      if (!name) return;
+      sendControl({ action: "lidar_offset_delta", name, axis, delta: sign * step });
+      setTimeout(refreshLidarState, 120);
+    });
+  });
+
+  offsetReset.addEventListener("click", () => {
+    const name = selectedLidarName();
+    if (!name) return;
+    sendControl({ action: "lidar_offset_set", name, x: 0, y: 0, z: 0 });
+    setTimeout(refreshLidarState, 120);
+  });
+
+  setInterval(refreshLidarState, 1000);
+  refreshLidarState();
 })();
 </script>
 </body>
@@ -141,6 +229,19 @@ class WebFrameServer:
                 return jsonify({"ok": accepted})
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
+
+        @self._app.route("/lidar_state", methods=["GET"])
+        def lidar_state():
+            if self._state_callback is None:
+                return jsonify({"ok": False, "error": "state callback not set", "lidars": []}), 503
+            try:
+                payload = self._state_callback()
+                if not isinstance(payload, dict):
+                    payload = {}
+                payload["ok"] = True
+                return jsonify(payload)
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e), "lidars": []}), 500
 
     def _mjpeg_generator(self):
         while self._running:
@@ -186,6 +287,9 @@ class WebFrameServer:
 
     def set_control_callback(self, callback):
         self._control_callback = callback
+
+    def set_state_callback(self, callback):
+        self._state_callback = callback
 
     def start(self):
         if self._running:

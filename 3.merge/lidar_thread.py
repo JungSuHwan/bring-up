@@ -30,6 +30,29 @@ class LidarReceiver(threading.Thread):
         self.offset_y = offset_y  # Down: Negative, Up: Positive
         self.offset_z = offset_z  # Forward: Negative, Backward: Positive (Default, can be changed)
 
+    def get_offset(self):
+        with self.lock:
+            return {
+                "x": float(self.offset_x),
+                "y": float(self.offset_y),
+                "z": float(self.offset_z),
+            }
+
+    def set_offset(self, x=None, y=None, z=None):
+        with self.lock:
+            if x is not None:
+                self.offset_x = float(x)
+            if y is not None:
+                self.offset_y = float(y)
+            if z is not None:
+                self.offset_z = float(z)
+
+    def add_offset(self, dx=0.0, dy=0.0, dz=0.0):
+        with self.lock:
+            self.offset_x += float(dx)
+            self.offset_y += float(dy)
+            self.offset_z += float(dz)
+
     def run(self):
         self.running = True
         while self.running:
@@ -157,6 +180,10 @@ class LidarReceiver(threading.Thread):
             
             # Convert to 3D Points
             points = []
+            with self.lock:
+                off_x = float(self.offset_x)
+                off_y = float(self.offset_y)
+                off_z = float(self.offset_z)
             angle_curr = angle_begin
             for r in ranges:
                 if r > 0.05:
@@ -218,9 +245,9 @@ class LidarReceiver(threading.Thread):
                     # x = -r * sin(rad)
                     # z = -r * cos(rad)
                     
-                    x_gl = (-r * math.sin(rad)) + self.offset_x
-                    y_gl = self.offset_y
-                    z_gl = (-r * math.cos(rad)) + self.offset_z
+                    x_gl = (-r * math.sin(rad)) + off_x
+                    y_gl = off_y
+                    z_gl = (-r * math.cos(rad)) + off_z
                     
                     points.append(x_gl) # x
                     points.append(y_gl) # y
@@ -255,4 +282,9 @@ class LidarReceiver(threading.Thread):
                 "connected": self.connected,
                 "point_count": len(self.latest_points_3d) // 3,
                 "fps": float(self.frame_rate_hz),
+                "offset": {
+                    "x": float(self.offset_x),
+                    "y": float(self.offset_y),
+                    "z": float(self.offset_z),
+                },
             }

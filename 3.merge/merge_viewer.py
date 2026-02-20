@@ -139,6 +139,10 @@ def main():
     web_host = args.web_host if args.web else web_options["host"]
     web_port = args.web_port if args.web else web_options["port"]
     web_fps = args.web_fps if args.web else web_options["fps"]
+    offset_ui_state = {
+        "selected_idx": 0,
+        "step": 0.01,  # meter
+    }
 
     try:
         # 1. Initialize ZED
@@ -197,6 +201,120 @@ def main():
         )
         print(f"[Display] PC window enabled: {pc_window_enabled}")
 
+        def get_selected_lidar():
+            if not lidars:
+                return None
+            idx = max(0, min(int(offset_ui_state["selected_idx"]), len(lidars) - 1))
+            offset_ui_state["selected_idx"] = idx
+            return lidars[idx]
+
+        def get_runtime_lidar_state():
+            items = []
+            for lidar in lidars:
+                status = lidar.get_status()
+                items.append({
+                    "name": lidar.name,
+                    "connected": bool(status.get("connected", False)),
+                    "fps": float(status.get("fps", 0.0)),
+                    "point_count": int(status.get("point_count", 0)),
+                    "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
+                })
+            selected_name = None
+            selected = get_selected_lidar()
+            if selected is not None:
+                selected_name = selected.name
+            return {
+                "selected_name": selected_name,
+                "step": float(offset_ui_state["step"]),
+                "lidars": items,
+            }
+
+        def apply_offset_control(action, payload):
+            if not lidars:
+                return False
+
+            if action == "select_prev_lidar":
+                offset_ui_state["selected_idx"] = (int(offset_ui_state["selected_idx"]) - 1) % len(lidars)
+                selected = get_selected_lidar()
+                if selected is not None:
+                    print(f"[Offset] selected lidar: {selected.name}")
+                return True
+            if action == "select_next_lidar":
+                offset_ui_state["selected_idx"] = (int(offset_ui_state["selected_idx"]) + 1) % len(lidars)
+                selected = get_selected_lidar()
+                if selected is not None:
+                    print(f"[Offset] selected lidar: {selected.name}")
+                return True
+
+            if action == "offset_step_down":
+                offset_ui_state["step"] = max(0.001, float(offset_ui_state["step"]) * 0.5)
+                print(f"[Offset] step: {offset_ui_state['step']:.4f} m")
+                return True
+            if action == "offset_step_up":
+                offset_ui_state["step"] = min(1.0, float(offset_ui_state["step"]) * 2.0)
+                print(f"[Offset] step: {offset_ui_state['step']:.4f} m")
+                return True
+            if action == "offset_set_step":
+                step = float(payload.get("step", offset_ui_state["step"]))
+                offset_ui_state["step"] = max(0.001, min(1.0, step))
+                print(f"[Offset] step: {offset_ui_state['step']:.4f} m")
+                return True
+
+            selected = get_selected_lidar()
+            if selected is None:
+                return False
+
+            step = float(offset_ui_state["step"])
+            if action == "offset_x_minus":
+                selected.add_offset(dx=-step)
+            elif action == "offset_x_plus":
+                selected.add_offset(dx=step)
+            elif action == "offset_y_minus":
+                selected.add_offset(dy=-step)
+            elif action == "offset_y_plus":
+                selected.add_offset(dy=step)
+            elif action == "offset_z_minus":
+                selected.add_offset(dz=-step)
+            elif action == "offset_z_plus":
+                selected.add_offset(dz=step)
+            elif action == "reset_selected_lidar_offset":
+                selected.set_offset(x=0.0, y=0.0, z=0.0)
+            elif action == "lidar_offset_delta":
+                name = str(payload.get("name", ""))
+                axis = str(payload.get("axis", "")).lower()
+                delta = float(payload.get("delta", 0.0))
+                target = next((l for l in lidars if l.name == name), None)
+                if target is None:
+                    return False
+                if axis == "x":
+                    target.add_offset(dx=delta)
+                elif axis == "y":
+                    target.add_offset(dy=delta)
+                elif axis == "z":
+                    target.add_offset(dz=delta)
+                else:
+                    return False
+                return True
+            elif action == "lidar_offset_set":
+                name = str(payload.get("name", ""))
+                target = next((l for l in lidars if l.name == name), None)
+                if target is None:
+                    return False
+                target.set_offset(
+                    x=payload.get("x", None),
+                    y=payload.get("y", None),
+                    z=payload.get("z", None),
+                )
+                return True
+            else:
+                return False
+
+            off = selected.get_offset()
+            print(f"[Offset] {selected.name} -> x={off['x']:+.3f}, y={off['y']:+.3f}, z={off['z']:+.3f} (step={step:.3f})")
+            return True
+
+        viewer.set_command_callback(apply_offset_control)
+
         reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params)
         print("[ZED] Spatial mapping session reset complete (fresh start).")
 
@@ -217,9 +335,10 @@ def main():
                 if action == "reset_view":
                     viewer.reset_pan_zoom()
                     return True
-                return False
+                return apply_offset_control(action, payload)
 
             server.set_control_callback(on_web_control)
+            server.set_state_callback(get_runtime_lidar_state)
             server.start()
             viewer.set_frame_callback(server.update_frame, fps=web_fps)
             print(f"[Web] Stream bind: {web_host}:{web_port} (fps={web_fps})")
@@ -230,6 +349,10 @@ def main():
         print("  [LMB Drag on 3D view] : Pan merged map")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan")
+        print("  [N/M] : Select LiDAR (prev/next)")
+        print("  [H/L] [U/O] [J/K] : Offset X/Y/Z -/+")
+        print("  [[/]] : Offset step down/up")
+        print("  [0] : Reset selected LiDAR offset")
         print("  [Esc/Q] : Quit")
         
         # Objects
@@ -283,6 +406,7 @@ def main():
                         "points": pts if pts else [],
                         "connected": status.get("connected", False),
                         "fps": status.get("fps", 0.0),
+                        "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                     })
 
                 viewer.update_lidar_multi(lidar_frames)

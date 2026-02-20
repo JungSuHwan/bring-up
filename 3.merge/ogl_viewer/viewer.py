@@ -253,12 +253,13 @@ class PointHandler:
         glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-    def draw(self, mvp):
+    def draw(self, mvp, color_override=None):
         if self.count == 0: return
         
         glUseProgram(self.shader.get_program_id())
         glUniformMatrix4fv(self.u_mvp, 1, GL_TRUE, (GLfloat * len(mvp))(*mvp))
-        glUniform3fv(self.u_color, 1, self.color)
+        color = color_override if color_override is not None else self.color
+        glUniform3fv(self.u_color, 1, color)
         
         glEnableVertexAttribArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
@@ -290,14 +291,21 @@ class GLViewer:
         self.tracking_state = sl.POSITIONAL_TRACKING_STATE.OFF
         self.mapping_state = sl.SPATIAL_MAPPING_STATE.NOT_ENABLED
         self.frame_callback = None
+        self.command_callback = None
         self.frame_interval_sec = 0.2
         self.last_frame_capture_time = 0.0
         self.lidar_handlers = {}
         self.lidar_order = []
         self.lidar_status = {}
         self.lidar_palette = [
-            [1.00, 0.00, 0.00],  # red (all lidars use red)
+            [1.00, 0.20, 0.20],  # red
+            [0.20, 0.85, 0.20],  # green
+            [0.20, 0.60, 1.00],  # blue
+            [1.00, 0.75, 0.20],  # orange
+            [0.95, 0.20, 0.95],  # magenta
+            [0.20, 0.95, 0.95],  # cyan
         ]
+        self.lidar_color_3d = [1.00, 0.00, 0.00]  # keep 3D points red
         self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.pan_sensitivity = 0.005  # meter / pixel
         self.zoom_sensitivity = 0.20  # meter / wheel step
@@ -447,6 +455,7 @@ class GLViewer:
             points = frame.get("points", [])
             connected = bool(frame.get("connected", False))
             fps = float(frame.get("fps", 0.0))
+            offset = frame.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
 
             handler = self._ensure_lidar_handler(name)
             handler.update(points)
@@ -454,6 +463,11 @@ class GLViewer:
                 "connected": connected,
                 "point_count": len(points) // 3,
                 "fps": fps,
+                "offset": {
+                    "x": float(offset.get("x", 0.0)),
+                    "y": float(offset.get("y", 0.0)),
+                    "z": float(offset.get("z", 0.0)),
+                },
             }
             seen_names.add(name)
 
@@ -492,6 +506,9 @@ class GLViewer:
         else:
             self.frame_interval_sec = 0.2
 
+    def set_command_callback(self, callback):
+        self.command_callback = callback
+
     def idle(self):
         if self.available:
             glutPostRedisplay()
@@ -513,6 +530,33 @@ class GLViewer:
             self.change_state = True
         if ord(key) == 114:                     # 'r' key
             self.reset_pan_zoom()
+
+        if not self.command_callback:
+            return
+        try:
+            ch = key.decode("utf-8").lower() if isinstance(key, (bytes, bytearray)) else chr(ord(key)).lower()
+        except Exception:
+            return
+
+        key_map = {
+            "n": "select_prev_lidar",
+            "m": "select_next_lidar",
+            "h": "offset_x_minus",
+            "l": "offset_x_plus",
+            "u": "offset_y_plus",
+            "o": "offset_y_minus",
+            "j": "offset_z_minus",
+            "k": "offset_z_plus",
+            "[": "offset_step_down",
+            "]": "offset_step_up",
+            "0": "reset_selected_lidar_offset",
+        }
+        action = key_map.get(ch)
+        if action:
+            try:
+                self.command_callback(action, {})
+            except Exception:
+                pass
 
     def pan_by_pixels(self, dx, dy):
         with self.mutex:
@@ -774,7 +818,7 @@ class GLViewer:
                 # Apply same pan in camera/view space for visual consistency with mesh.
                 projMatData = np.dot(np.array(self.projection.m, dtype=np.float32), pan_mat).flatten()
                 for name in self.lidar_order:
-                    self.lidar_handlers[name].draw(projMatData)
+                    self.lidar_handlers[name].draw(projMatData, color_override=self.lidar_color_3d)
                 
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
@@ -802,6 +846,7 @@ class GLViewer:
                 self.print_GL(-0.95, 0.9, "Hit Space Bar to stop spatial mapping.")
             glColor3f(0.65, 0.65, 0.65)
             self.print_GL(-0.95, 0.97, "Drag(LMB): Pan / Wheel: Zoom / R: Reset")
+            self.print_GL(-0.95, 0.04, "Offset keys: N/M lidar, H/L X, U/O Y, J/K Z, [/] step, 0 reset")
 
             positional_tracking_state_str = "POSITIONAL TRACKING STATE : "
             spatial_mapping_state_str = "SPATIAL MAPPING STATE : "
@@ -834,9 +879,17 @@ class GLViewer:
                 point_count = int(status.get("point_count", 0))
                 fps = float(status.get("fps", 0.0))
                 up_down = "UP" if connected else "DOWN"
+                offset = status.get("offset", {})
+                off_x = float(offset.get("x", 0.0))
+                off_y = float(offset.get("y", 0.0))
+                off_z = float(offset.get("z", 0.0))
 
                 glColor3f(color[0], color[1], color[2])
-                self.print_GL(-0.95, text_y, f"LIDAR {name}: {up_down} / pts={point_count} / fps={fps:4.1f}")
+                self.print_GL(
+                    -0.95,
+                    text_y,
+                    f"LIDAR {name}: {up_down} / pts={point_count} / fps={fps:4.1f} / off=({off_x:+.3f},{off_y:+.3f},{off_z:+.3f})",
+                )
                 text_y -= 0.06
                 if text_y < -0.95:
                     break
