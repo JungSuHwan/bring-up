@@ -292,8 +292,19 @@ class GLViewer:
         self.frame_callback = None
         self.frame_interval_sec = 0.2
         self.last_frame_capture_time = 0.0
+        self.lidar_handlers = {}
+        self.lidar_order = []
+        self.lidar_status = {}
+        self.lidar_palette = [
+            [1.00, 0.25, 0.25],  # red
+            [0.20, 0.85, 1.00],  # cyan
+            [0.95, 0.90, 0.20],  # yellow
+            [0.35, 1.00, 0.35],  # green
+            [1.00, 0.55, 0.15],  # orange
+            [0.85, 0.35, 1.00],  # magenta
+        ]
 
-    def init(self, _params, _mesh, _create_mesh): 
+    def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
         wnd_w = glutGet(GLUT_SCREEN_WIDTH)
         wnd_h = glutGet(GLUT_SCREEN_HEIGHT)
@@ -308,6 +319,8 @@ class GLViewer:
         glutInitWindowPosition(0, 0) # The window opens at the upper left corner of the screen
         glutInitDisplayMode(GLUT_DOUBLE | GLUT_SRGB)
         glutCreateWindow(b"ZED Spatial Mapping")
+        if not show_window:
+            glutHideWindow()
         glViewport(0, 0, int(width), int(height))
 
         glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE,
@@ -319,9 +332,6 @@ class GLViewer:
         # Initialize image renderer
         self.image_handler.initialize(_params.image_size)
         
-        self.point_handler = PointHandler()
-        self.point_handler.initialize()
-
         self.init_mesh(_mesh, _create_mesh)
 
         # Compile and create the shader 
@@ -400,9 +410,53 @@ class GLViewer:
         self.ask_clear = True
         self.new_chunks = True
 
+    def _ensure_lidar_handler(self, name):
+        if name in self.lidar_handlers:
+            return self.lidar_handlers[name]
+
+        handler = PointHandler()
+        handler.initialize()
+        color_idx = len(self.lidar_order) % len(self.lidar_palette)
+        handler.color = self.lidar_palette[color_idx]
+
+        self.lidar_handlers[name] = handler
+        self.lidar_order.append(name)
+        return handler
+
     def update_lidar(self, points):
+        self.update_lidar_multi([{
+            "name": "lidar",
+            "points": points if points is not None else [],
+            "connected": True,
+        }])
+
+    def update_lidar_multi(self, lidar_frames):
         self.mutex.acquire()
-        self.point_handler.update(points)
+        seen_names = set()
+
+        for frame in lidar_frames:
+            name = str(frame.get("name", "lidar"))
+            points = frame.get("points", [])
+            connected = bool(frame.get("connected", False))
+            fps = float(frame.get("fps", 0.0))
+
+            handler = self._ensure_lidar_handler(name)
+            handler.update(points)
+            self.lidar_status[name] = {
+                "connected": connected,
+                "point_count": len(points) // 3,
+                "fps": fps,
+            }
+            seen_names.add(name)
+
+        for name in self.lidar_order:
+            if name not in seen_names:
+                self.lidar_handlers[name].update([])
+                status = self.lidar_status.get(name, {})
+                status["point_count"] = 0
+                status["fps"] = float(status.get("fps", 0.0))
+                self.lidar_status[name] = status
+
         self.mutex.release()
 
     def update_view(self, _image, _depth_ptr, _pose, _tracking_state, _mapping_state):     
@@ -565,7 +619,8 @@ class GLViewer:
             mvp_2d = np.dot(rot_x_90.reshape(4,4), ortho_mat.reshape(4,4)).flatten()
             
             glPointSize(3.0)
-            self.point_handler.draw(mvp_2d)
+            for name in self.lidar_order:
+                self.lidar_handlers[name].draw(mvp_2d)
 
             # Restoring logic
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -649,7 +704,8 @@ class GLViewer:
                 glPointSize(5.0) # Make them visible
                 # Use Camera Projection ONLY (Points are in Camera Frame)
                 projMatData = self.projection.m.flatten()
-                self.point_handler.draw(projMatData)
+                for name in self.lidar_order:
+                    self.lidar_handlers[name].draw(projMatData)
                 
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
@@ -697,6 +753,22 @@ class GLViewer:
                     glColor3f(0.55, 0.65, 0.55)
                     state_str = spatial_mapping_state_str + str(sl.SPATIAL_MAPPING_STATE.NOT_ENABLED)
             self.print_GL(-0.95, 0.83, state_str)
+
+            # LiDAR legend and status (multi-lidar aware)
+            text_y = 0.76
+            for name in self.lidar_order:
+                color = self.lidar_handlers[name].color
+                status = self.lidar_status.get(name, {})
+                connected = bool(status.get("connected", False))
+                point_count = int(status.get("point_count", 0))
+                fps = float(status.get("fps", 0.0))
+                up_down = "UP" if connected else "DOWN"
+
+                glColor3f(color[0], color[1], color[2])
+                self.print_GL(-0.95, text_y, f"LIDAR {name}: {up_down} / pts={point_count} / fps={fps:4.1f}")
+                text_y -= 0.06
+                if text_y < -0.95:
+                    break
 
 class SubMapObj:
     def __init__(self):

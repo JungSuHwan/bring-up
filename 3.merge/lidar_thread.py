@@ -10,21 +10,25 @@ STX = b'\x02'
 ETX = b'\x03'
 
 class LidarReceiver(threading.Thread):
-    def __init__(self, ip='192.168.0.31', port=8000):
+    def __init__(self, ip='192.168.0.31', port=8000, name='lidar', offset_x=-0.12, offset_y=0.0, offset_z=0.0):
         super().__init__()
         self.ip = ip
         self.port = port
+        self.name = name
         self.running = False
         self.connected = False
         self.socket = None
         self.lock = threading.Lock()
         self.latest_points_3d = [] # List of [x, y, z]
+        self.last_connect_log_time = 0.0
+        self.last_frame_time = None
+        self.frame_rate_hz = 0.0
         
         # Extrinsic Parameters (Position relative to Camera)
         # Unit: Meters
-        self.offset_x = -0.12  # Left: Negative, Right: Positive
-        self.offset_y = 0.0    # Down: Negative, Up: Positive
-        self.offset_z = 0.0    # Forward: Negative, Backward: Positive (Default, can be changed)
+        self.offset_x = offset_x  # Left: Negative, Right: Positive
+        self.offset_y = offset_y  # Down: Negative, Up: Positive
+        self.offset_z = offset_z  # Forward: Negative, Backward: Positive (Default, can be changed)
 
     def run(self):
         self.running = True
@@ -37,17 +41,22 @@ class LidarReceiver(threading.Thread):
             try:
                 self._receive_loop()
             except Exception as e:
-                print(f"[Lidar] Connection lost: {e}")
+                if self.running:
+                    print(f"[Lidar:{self.name}] Connection lost: {e}")
                 self.connected = False
                 if self.socket:
-                    self.socket.close()
+                    try:
+                        self.socket.close()
+                    except Exception:
+                        pass
+                    self.socket = None
 
     def connect(self):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(2.0)
             self.socket.connect((self.ip, self.port))
-            print(f"[Lidar] Connected to {self.ip}:{self.port}")
+            print(f"[Lidar:{self.name}] Connected to {self.ip}:{self.port}")
             
             # Init Sequence
             self.send_command('SetAccessLevel,0000')
@@ -55,13 +64,24 @@ class LidarReceiver(threading.Thread):
             self.send_command('SensorStart')
             self.connected = True
         except Exception as e:
-            # print(f"[Lidar] Connect failed: {e}")
-            pass
+            now = time.time()
+            if now - self.last_connect_log_time > 5.0:
+                print(f"[Lidar:{self.name}] Connect failed to {self.ip}:{self.port} - {e}")
+                self.last_connect_log_time = now
 
     def stop(self):
         self.running = False
+        self.connected = False
         if self.socket:
-            self.socket.close()
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            self.socket = None
 
     def send_command(self, cmd):
         if not self.socket: return
@@ -105,6 +125,8 @@ class LidarReceiver(threading.Thread):
             except socket.timeout:
                 continue
             except Exception:
+                if not self.running:
+                    return
                 raise
 
     def _parse_packet(self, packet_bytes):
@@ -208,6 +230,16 @@ class LidarReceiver(threading.Thread):
                 
             with self.lock:
                 self.latest_points_3d = points # Flat list [x, y, z, x, y, z...] or simple list of lists
+                now = time.time()
+                if self.last_frame_time is not None:
+                    dt = now - self.last_frame_time
+                    if dt > 0:
+                        inst_fps = 1.0 / dt
+                        if self.frame_rate_hz <= 0.0:
+                            self.frame_rate_hz = inst_fps
+                        else:
+                            self.frame_rate_hz = (0.85 * self.frame_rate_hz) + (0.15 * inst_fps)
+                self.last_frame_time = now
                 
         except Exception as e:
             # print(f"Parse error: {e}")
@@ -216,3 +248,11 @@ class LidarReceiver(threading.Thread):
     def get_latest_points(self):
         with self.lock:
             return list(self.latest_points_3d) # Return copy
+
+    def get_status(self):
+        with self.lock:
+            return {
+                "connected": self.connected,
+                "point_count": len(self.latest_points_3d) // 3,
+                "fps": float(self.frame_rate_hz),
+            }

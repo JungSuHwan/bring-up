@@ -2,6 +2,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 from flask import Flask, Response
 from werkzeug.serving import make_server
 
@@ -65,11 +66,24 @@ class WebFrameServer:
             )
             time.sleep(0.03)
 
-    def update_frame(self, rgb_frame):
-        if rgb_frame is None:
+    def update_frame(self, frame):
+        if frame is None:
             return
         try:
-            bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+            if not isinstance(frame, np.ndarray) or frame.ndim != 3:
+                return
+
+            channels = frame.shape[2]
+            if channels == 3:
+                # Accept RGB by default. If source is BGR, output color may look swapped.
+                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            elif channels == 4:
+                # ZED Mat often comes as BGRA/RGBA depending on source path.
+                # Try BGRA first for practical compatibility.
+                bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            else:
+                return
+
             ok, encoded = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ok:
                 return

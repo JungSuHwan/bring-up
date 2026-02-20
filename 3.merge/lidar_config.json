@@ -1,0 +1,35 @@
+{
+  "display": {
+    "pc_window_enabled": false
+  },
+  "web": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080,
+    "fps": 30
+  },
+  "lidars": [
+    {
+      "name": "lidar_31",
+      "enabled": true,
+      "ip": "192.168.0.31",
+      "port": 8000,
+      "offset": {
+        "x": -0.12,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    {
+      "name": "lidar_41",
+      "enabled": true,
+      "ip": "192.168.0.41",
+      "port": 8000,
+      "offset": {
+        "x": 0.12,
+        "y": 0.0,
+        "z": 0.0
+      }
+    }
+  ]
+}
