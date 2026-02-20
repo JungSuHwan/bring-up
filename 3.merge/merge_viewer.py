@@ -148,24 +148,6 @@ def main():
         "step": 0.01,  # meter
         "yaw_step_deg": 0.5,  # degree
     }
-    console_action_map = {
-        ",": "select_prev_lidar",
-        ".": "select_next_lidar",
-        "a": "offset_x_minus",
-        "d": "offset_x_plus",
-        "r": "offset_y_plus",
-        "f": "offset_y_minus",
-        "w": "offset_z_minus",
-        "s": "offset_z_plus",
-        "j": "yaw_minus",
-        "l": "yaw_plus",
-        "[": "offset_step_down",
-        "]": "offset_step_up",
-        "-": "yaw_step_down",
-        "=": "yaw_step_up",
-        "x": "reset_selected_lidar_offset",
-        "c": "reset_selected_lidar_yaw",
-    }
     profiles = {}
 
     try:
@@ -265,6 +247,24 @@ def main():
                 "lidars": items,
             }
 
+        def update_control_status():
+            selected = get_selected_lidar()
+            if selected is None:
+                if viewer is not None:
+                    viewer.set_control_status("LiDAR: none")
+                return
+            status = selected.get_status()
+            off = status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
+            yaw = float(status.get("yaw_deg", 0.0))
+            text = (
+                f"lidar={selected.name} "
+                f"step={offset_ui_state['step']:.3f}m yaw_step={offset_ui_state['yaw_step_deg']:.2f}deg "
+                f"off=({float(off.get('x', 0.0)):+.3f},{float(off.get('y', 0.0)):+.3f},{float(off.get('z', 0.0)):+.3f}) "
+                f"yaw={yaw:+.2f}"
+            )
+            if viewer is not None:
+                viewer.set_control_status(text)
+
         def persist_profiles():
             try:
                 with open(profiles_path, "w", encoding="utf-8") as f:
@@ -286,6 +286,15 @@ def main():
                 return True
             if action == "select_next_lidar":
                 offset_ui_state["selected_idx"] = (int(offset_ui_state["selected_idx"]) + 1) % len(lidars)
+                selected = get_selected_lidar()
+                if selected is not None:
+                    print(f"[Offset] selected lidar: {selected.name}")
+                return True
+            if action == "select_lidar_index":
+                idx = int(payload.get("index", -1))
+                if idx < 0 or idx >= len(lidars):
+                    return False
+                offset_ui_state["selected_idx"] = idx
                 selected = get_selected_lidar()
                 if selected is not None:
                     print(f"[Offset] selected lidar: {selected.name}")
@@ -478,7 +487,13 @@ def main():
             print(f"[Offset] {selected.name} -> x={off['x']:+.3f}, y={off['y']:+.3f}, z={off['z']:+.3f}, yaw={yaw:+.2f}deg (step={step:.3f}m/{offset_ui_state['yaw_step_deg']:.2f}deg)")
             return True
 
-        viewer.set_command_callback(apply_offset_control)
+        def dispatch_control(action, payload):
+            ok = apply_offset_control(action, payload)
+            if ok:
+                update_control_status()
+            return ok
+
+        update_control_status()
 
         reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params)
         print("[ZED] Spatial mapping session reset complete (fresh start).")
@@ -500,7 +515,7 @@ def main():
                 if action == "reset_view":
                     viewer.reset_pan_zoom()
                     return True
-                return apply_offset_control(action, payload)
+                return dispatch_control(action, payload)
 
             server.set_control_callback(on_web_control)
             server.set_state_callback(get_runtime_lidar_state)
@@ -514,17 +529,8 @@ def main():
         print("  [Space] : Pause/Resume Spatial Mapping")
         print("  [LMB Drag on 3D view] : Pan merged map")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
-        print("  [R] : Reset pan")
-        print("  [Console/OpenGL] ,/. : Select LiDAR prev/next")
-        print("  [Console/OpenGL] A/D : X -/+")
-        print("  [Console/OpenGL] R/F : Y +/-")
-        print("  [Console/OpenGL] W/S : Z -/+")
-        print("  [Console/OpenGL] J/L : Yaw -/+")
-        print("  [Console/OpenGL] [/] : XYZ step down/up")
-        print("  [Console/OpenGL] -/= : Yaw step down/up")
-        print("  [Console/OpenGL] X : Reset selected LiDAR offset")
-        print("  [Console/OpenGL] C : Reset selected LiDAR yaw")
-        print("  [Web] Fine/Normal/Coarse + Axis Drag + Profile Save/Load/Delete")
+        print("  [R] : Reset pan (viewer window)")
+        print("  [External UI/API] Use /control for x/y/z/yaw/step realtime control")
         print("  [Esc/Q] : Quit")
         
         # Objects
@@ -545,20 +551,10 @@ def main():
                             print("[System] Ctrl+V detected in terminal -> exiting")
                             should_exit = True
                             continue
-                        # consume extended key tail byte
+                        # consume extended key tail byte (arrow/F-keys)
                         if key in (b"\x00", b"\xe0"):
                             if msvcrt.kbhit():
                                 msvcrt.getch()
-                            continue
-
-                        # Console key control for LiDAR extrinsics.
-                        try:
-                            ch = key.decode("utf-8", errors="ignore").lower()
-                        except Exception:
-                            ch = ""
-                        action = console_action_map.get(ch)
-                        if action:
-                            apply_offset_control(action, {})
                             continue
                         if key in (b"q", b"Q", b"\x1b"):
                             should_exit = True

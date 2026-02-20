@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiDAR Controller</title>
+  <style>
+    :root {
+      --bg: #0f131b;
+      --panel: #171d27;
+      --line: #2a3344;
+      --text: #ecf1fb;
+      --muted: #9aa7be;
+      --accent: #59b7ff;
+      --good: #90e39a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", "Noto Sans KR", sans-serif; }
+    .app { max-width: 920px; margin: 0 auto; padding: 14px; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .title { font-weight: 700; font-size: 20px; }
+    .status { font-size: 13px; color: var(--muted); font-family: Consolas, "Courier New", monospace; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .grid { display: grid; grid-template-columns: 70px 1fr auto auto auto; gap: 8px; align-items: center; }
+    .grid + .grid { margin-top: 8px; }
+    select, input {
+      background: #0e1420;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      min-height: 38px;
+    }
+    button {
+      background: #1d2a3f;
+      color: var(--text);
+      border: 1px solid #2d466c;
+      border-radius: 8px;
+      min-height: 38px;
+      padding: 0 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .ok { color: var(--good); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="top">
+      <div class="title">LiDAR x/y/z/yaw Controller</div>
+      <div id="status" class="status">connecting...</div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label for="lidarSel">LiDAR</label>
+        <select id="lidarSel"></select>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label for="stepInput">XYZ step (m)</label>
+        <input id="stepInput" type="number" min="0.001" max="1" step="0.001" value="0.01" />
+        <button id="applyStepBtn" type="button">Apply XYZ Step</button>
+        <label for="yawStepInput">Yaw step (deg)</label>
+        <input id="yawStepInput" type="number" min="0.1" max="20" step="0.1" value="0.5" />
+        <button id="applyYawStepBtn" type="button">Apply Yaw Step</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div>X</div>
+        <input id="xInput" type="number" step="0.001" />
+        <button id="setXBtn" type="button">Set</button>
+        <button id="decXBtn" type="button">-</button>
+        <button id="incXBtn" type="button">+</button>
+      </div>
+      <div class="grid">
+        <div>Y</div>
+        <input id="yInput" type="number" step="0.001" />
+        <button id="setYBtn" type="button">Set</button>
+        <button id="decYBtn" type="button">-</button>
+        <button id="incYBtn" type="button">+</button>
+      </div>
+      <div class="grid">
+        <div>Z</div>
+        <input id="zInput" type="number" step="0.001" />
+        <button id="setZBtn" type="button">Set</button>
+        <button id="decZBtn" type="button">-</button>
+        <button id="incZBtn" type="button">+</button>
+      </div>
+      <div class="grid">
+        <div>Yaw</div>
+        <input id="yawInput" type="number" step="0.1" />
+        <button id="setYawBtn" type="button">Set</button>
+        <button id="decYawBtn" type="button">-</button>
+        <button id="incYawBtn" type="button">+</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="resetXYZBtn" type="button">Reset XYZ</button>
+        <button id="resetYawBtn" type="button">Reset Yaw</button>
+        <span class="status">applies in realtime via <span class="ok">/control</span></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+    const lidarSel = $("lidarSel");
+    const stepInput = $("stepInput");
+    const yawStepInput = $("yawStepInput");
+    const xInput = $("xInput");
+    const yInput = $("yInput");
+    const zInput = $("zInput");
+    const yawInput = $("yawInput");
+    let lastState = {};
+
+    async function apiControl(action, payload = {}) {
+      const res = await fetch("/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...payload }),
+      });
+      if (!res.ok) throw new Error("control failed");
+      return res.json();
+    }
+
+    async function refreshState() {
+      try {
+        const res = await fetch("/lidar_state", { cache: "no-store" });
+        if (!res.ok) throw new Error("state unavailable");
+        const data = await res.json();
+        lastState = data;
+        const lidars = Array.isArray(data.lidars) ? data.lidars : [];
+        const prev = lidarSel.value;
+        lidarSel.innerHTML = "";
+        for (const l of lidars) {
+          const o = document.createElement("option");
+          o.value = l.name;
+          o.textContent = l.name;
+          lidarSel.appendChild(o);
+        }
+        if (prev && lidars.some((l) => l.name === prev)) lidarSel.value = prev;
+        else if (data.selected_name) lidarSel.value = data.selected_name;
+
+        if (typeof data.step === "number") stepInput.value = data.step.toFixed(3);
+        if (typeof data.yaw_step_deg === "number") yawStepInput.value = data.yaw_step_deg.toFixed(2);
+
+        const selected = lidars.find((l) => l.name === lidarSel.value) || lidars[0];
+        if (selected) {
+          const off = selected.offset || { x: 0, y: 0, z: 0 };
+          xInput.value = Number(off.x || 0).toFixed(3);
+          yInput.value = Number(off.y || 0).toFixed(3);
+          zInput.value = Number(off.z || 0).toFixed(3);
+          yawInput.value = Number(selected.yaw_deg || 0).toFixed(2);
+          statusEl.textContent = `connected | lidar=${selected.name} | up=${!!selected.connected} | fps=${Number(selected.fps || 0).toFixed(1)}`;
+        } else {
+          statusEl.textContent = "connected | no lidar";
+        }
+      } catch (e) {
+        statusEl.textContent = `disconnected | ${e}`;
+      }
+    }
+
+    function selectedName() {
+      return lidarSel.value || "";
+    }
+
+    async function setAxis(axis, value) {
+      const name = selectedName();
+      if (!name) return;
+      await apiControl("lidar_offset_set", { name, [axis]: Number(value) });
+      await refreshState();
+    }
+
+    async function deltaAxis(axis, sign) {
+      const name = selectedName();
+      if (!name) return;
+      const step = Number(stepInput.value || 0.01);
+      await apiControl("lidar_offset_delta", { name, axis, delta: sign * step });
+      await refreshState();
+    }
+
+    async function setYaw(value) {
+      const name = selectedName();
+      if (!name) return;
+      await apiControl("lidar_yaw_set", { name, yaw_deg: Number(value) });
+      await refreshState();
+    }
+
+    async function deltaYaw(sign) {
+      const name = selectedName();
+      if (!name) return;
+      const step = Number(yawStepInput.value || 0.5);
+      await apiControl("lidar_yaw_delta", { name, delta_deg: sign * step });
+      await refreshState();
+    }
+
+    $("refreshBtn").addEventListener("click", refreshState);
+    $("applyStepBtn").addEventListener("click", async () => {
+      await apiControl("offset_set_step", { step: Number(stepInput.value || 0.01) });
+      await refreshState();
+    });
+    $("applyYawStepBtn").addEventListener("click", async () => {
+      await apiControl("yaw_set_step", { yaw_step_deg: Number(yawStepInput.value || 0.5) });
+      await refreshState();
+    });
+
+    $("setXBtn").addEventListener("click", () => setAxis("x", xInput.value));
+    $("setYBtn").addEventListener("click", () => setAxis("y", yInput.value));
+    $("setZBtn").addEventListener("click", () => setAxis("z", zInput.value));
+    $("setYawBtn").addEventListener("click", () => setYaw(yawInput.value));
+
+    $("decXBtn").addEventListener("click", () => deltaAxis("x", -1));
+    $("incXBtn").addEventListener("click", () => deltaAxis("x", +1));
+    $("decYBtn").addEventListener("click", () => deltaAxis("y", -1));
+    $("incYBtn").addEventListener("click", () => deltaAxis("y", +1));
+    $("decZBtn").addEventListener("click", () => deltaAxis("z", -1));
+    $("incZBtn").addEventListener("click", () => deltaAxis("z", +1));
+    $("decYawBtn").addEventListener("click", () => deltaYaw(-1));
+    $("incYawBtn").addEventListener("click", () => deltaYaw(+1));
+
+    $("resetXYZBtn").addEventListener("click", async () => {
+      const name = selectedName();
+      if (!name) return;
+      await apiControl("lidar_offset_set", { name, x: 0, y: 0, z: 0 });
+      await refreshState();
+    });
+    $("resetYawBtn").addEventListener("click", async () => {
+      const name = selectedName();
+      if (!name) return;
+      await apiControl("lidar_yaw_set", { name, yaw_deg: 0 });
+      await refreshState();
+    });
+
+    setInterval(refreshState, 600);
+    refreshState();
+  </script>
+</body>
+</html>

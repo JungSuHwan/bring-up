@@ -294,6 +294,7 @@ class GLViewer:
         self.command_callback = None
         self.frame_interval_sec = 0.2
         self.last_frame_capture_time = 0.0
+        self.control_status_text = ""
         self.lidar_handlers = {}
         self.lidar_order = []
         self.lidar_status = {}
@@ -305,7 +306,6 @@ class GLViewer:
             [0.95, 0.20, 0.95],  # magenta
             [0.20, 0.95, 0.95],  # cyan
         ]
-        self.lidar_color_3d = [1.00, 0.00, 0.00]  # keep 3D points red
         self.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         self.pan_sensitivity = 0.005  # meter / pixel
         self.zoom_sensitivity = 0.20  # meter / wheel step
@@ -510,6 +510,10 @@ class GLViewer:
 
     def set_command_callback(self, callback):
         self.command_callback = callback
+
+    def set_control_status(self, text):
+        with self.mutex:
+            self.control_status_text = str(text) if text is not None else ""
 
     def idle(self):
         if self.available:
@@ -744,6 +748,7 @@ class GLViewer:
             # Disable 3D overlay text rendering.
             # (Keep function for potential future debugging use.)
             # self.print_text(left_w, wnd_h)
+            self.draw_control_status(left_w, wnd_h)
 
             # Optional frame callback for web streaming.
             if self.frame_callback:
@@ -766,6 +771,13 @@ class GLViewer:
 
             glutSwapBuffers()
             glutPostRedisplay()
+
+    def draw_control_status(self, left_w, wnd_h):
+        if not self.control_status_text:
+            return
+        glViewport(left_w, 0, int(glutGet(GLUT_WINDOW_WIDTH) - left_w), wnd_h)
+        glColor3f(0.88, 0.88, 0.88)
+        self.print_GL(-0.95, -0.92, self.control_status_text)
 
     # Update both Mesh and FPC
     def update(self):
@@ -827,7 +839,8 @@ class GLViewer:
                 # Apply same pan in camera/view space for visual consistency with mesh.
                 projMatData = np.dot(np.array(self.projection.m, dtype=np.float32), pan_mat).flatten()
                 for name in self.lidar_order:
-                    self.lidar_handlers[name].draw(projMatData, color_override=self.lidar_color_3d)
+                    # Keep per-lidar color consistent with 2D view.
+                    self.lidar_handlers[name].draw(projMatData)
                 
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 

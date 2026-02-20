@@ -1,6 +1,6 @@
 {
   "display": {
-    "pc_window_enabled": true
+    "pc_window_enabled": false
   },
   "web": {
     "enabled": true,
@@ -22,7 +22,7 @@
     },
     {
       "name": "lidar_41",
-      "enabled": false,
+      "enabled": true,
       "ip": "192.168.0.41",
       "port": 8000,
       "offset": {

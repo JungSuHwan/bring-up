@@ -1,8 +1,10 @@
 import threading
+import logging
+import os
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
 
@@ -32,23 +34,114 @@ class WebFrameServer:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>LiDAR + ZED Merge Stream</title>
+  <title>LiDAR + ZED Web View</title>
   <style>
-    body { margin: 0; background: #111; color: #ddd; font-family: Arial, sans-serif; }
-    .wrap { padding: 10px; }
-    img { width: 100%; height: auto; border: 1px solid #333; user-select: none; -webkit-user-drag: none; touch-action: none; }
-    .hint { margin: 8px 0 0; color: #aaa; font-size: 14px; }
+    :root {
+      --bg: #0f1218;
+      --panel: #171b24;
+      --text: #e7ecf6;
+      --muted: #9ea8bb;
+      --line: #2a3242;
+      --accent: #56b6ff;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(1200px 600px at 20% -10%, #1e2636 0%, var(--bg) 45%);
+      color: var(--text);
+      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+    }
+    .layout {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      height: 100%;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(23, 27, 36, 0.8);
+      backdrop-filter: blur(4px);
+    }
+    .title {
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .stage {
+      padding: 10px;
+      min-height: 0;
+    }
+    .stream-box {
+      height: 100%;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0b0f15;
+      overflow: hidden;
+      position: relative;
+    }
+    .stream {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      user-select: none;
+      -webkit-user-drag: none;
+      touch-action: none;
+      display: block;
+    }
+    .stream.mode-map {
+      width: 150%;
+      transform: translateX(-33.3333%);
+      transform-origin: top left;
+    }
+    .hintbar {
+      border-top: 1px solid var(--line);
+      background: rgba(23, 27, 36, 0.9);
+      color: var(--muted);
+      font-size: 13px;
+      padding: 9px 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ok { color: #90e39a; }
+    .warn { color: #ffd580; }
+    .mono { font-family: Consolas, "Courier New", monospace; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h3>LiDAR + ZED Merge Stream</h3>
-    <img id="stream" src="/stream.mjpg" alt="stream" />
-    <p class="hint">Right 3D panel only: drag to pan, wheel to zoom.</p>
+  <div class="layout">
+    <div class="topbar">
+      <div class="title">LiDAR + ZED Web Display</div>
+      <div id="meta" class="meta mono">state: loading...</div>
+    </div>
+    <div class="stage">
+      <div class="stream-box">
+        <img id="stream" class="stream" src="/stream.mjpg" alt="stream" />
+      </div>
+    </div>
+    <div class="hintbar">
+      <span class="ok">Drag</span>: pan map,
+      <span class="ok">Wheel</span>: zoom,
+      <span class="warn">View</span>: <span class="mono">?view=full</span> or <span class="mono">?view=map</span>,
+      <span class="warn">Console</span>: extrinsic tuning keys
+    </div>
   </div>
 <script>
 (() => {
   const stream = document.getElementById("stream");
+  const meta = document.getElementById("meta");
+  const params = new URLSearchParams(window.location.search);
+  const viewMode = (params.get("view") || "full").toLowerCase();
+  if (viewMode === "map") {
+    stream.classList.add("mode-map");
+  }
   let mouseDown = false;
   let dragging = false;
   let lastX = 0;
@@ -67,6 +160,9 @@ class WebFrameServer:
   }
 
   function in3DPanel(offsetX, width) {
+    if (viewMode === "map") {
+      return true;
+    }
     return offsetX >= (width / 3);
   }
 
@@ -114,11 +210,43 @@ class WebFrameServer:
     sendControl({ action: "zoom_steps", steps });
     e.preventDefault();
   }, { passive: false });
+
+  async function refreshState() {
+    try {
+      const res = await fetch("/lidar_state", { cache: "no-store" });
+      if (!res.ok) {
+        meta.textContent = "state: unavailable";
+        return;
+      }
+      const data = await res.json();
+      const lidars = Array.isArray(data.lidars) ? data.lidars : [];
+      if (lidars.length === 0) {
+        meta.textContent = "lidar: none";
+        return;
+      }
+      const selectedName = data.selected_name || lidars[0].name;
+      const target = lidars.find((x) => x.name === selectedName) || lidars[0];
+      const off = target.offset || { x: 0, y: 0, z: 0 };
+      const yaw = Number(target.yaw_deg || 0);
+      meta.textContent = `lidar=${target.name} status=${target.connected ? "UP" : "DOWN"} fps=${Number(target.fps || 0).toFixed(1)} off=(${Number(off.x).toFixed(3)},${Number(off.y).toFixed(3)},${Number(off.z).toFixed(3)}) yaw=${yaw.toFixed(2)}`;
+    } catch (_) {
+      meta.textContent = "state: error";
+    }
+  }
+
+  setInterval(refreshState, 1000);
+  refreshState();
 })();
 </script>
 </body>
 </html>
 """
+
+        @self._app.route("/controller")
+        def controller():
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            controller_dir = os.path.join(base_dir, "web_lidar_controller")
+            return send_from_directory(controller_dir, "index.html")
 
         @self._app.route("/stream.mjpg")
         def stream():
@@ -217,6 +345,8 @@ class WebFrameServer:
     def start(self):
         if self._running:
             return
+        # Suppress Werkzeug access logs (e.g. repeated /lidar_state polling).
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
         self._server = make_server(self.host, self.port, self._app, threaded=True)
         self._running = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
