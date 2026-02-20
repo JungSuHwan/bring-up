@@ -464,9 +464,100 @@ class GLViewer:
             glViewport(0, int(wnd_h/2), left_w, int(wnd_h/2))
             self.image_handler.draw(self.image_handler.tex_rgb)
 
-            # Bottom-Left: Depth
+            # Bottom-Left: LiDAR 2D View
             glViewport(0, 0, left_w, int(wnd_h/2))
-            self.image_handler.draw(self.image_handler.tex_depth)
+            
+            # Setup Orthographic Projection (Top-Down View)
+            # Range: +/- 5 meters
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            # Left, Right, Bottom, Top
+            # X is Left/Right (-5, 5), Z is Forward/Backward (-10, 0) -> mapped to Y
+            # Actually just map X->X, Z->Y for display
+            # Range: Wide view
+            glOrtho(-3, 3, -6, 1, -1, 1) # X: -3m~3m, Z: -6m~1m (1m behind camera)
+            
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+            
+            # Draw Grid
+            glLineWidth(1.0)
+            glBegin(GL_LINES)
+            glColor3f(0.3, 0.3, 0.3)
+            # Vertical lines (Range markers)
+            for i in range(-5, 2):
+                glVertex2f(-5.0, float(i))
+                glVertex2f( 5.0, float(i))
+            # Horizontal lines (Direction)
+            for i in range(-5, 6):
+                glVertex2f(float(i), -6.0)
+                glVertex2f(float(i),  1.0)
+            
+            # Forward Vector (Z axis negative)
+            glColor3f(0.0, 1.0, 0.0)
+            glVertex2f(0.0, 0.0)
+            glVertex2f(0.0, -1.0)
+            glEnd()
+            
+            # Draw LiDAR Points (Project 3D points to 2D: X, Z)
+            # Since point_handler uses a shader with MVP, we need to manually draw or transform
+            # But here we are in fixed function pipeline mode for grid.
+            # Let's use simple glBegin(GL_POINTS) for the 2D view as we have access to raw points via buffer? No.
+            # We don't have raw points easily here unless we store them.
+            # Hack: Use point_handler with an orthographic MVP matrix.
+            
+            # Top-Down MVP:
+            # View: Camera at (0, 10, 0) looking at (0, 0, -3), Up (0, 0, -1)
+            # Proj: Ortho
+            pass 
+            
+            glPopMatrix()
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+            
+            # Use PointHandler for 2D View (Top Down)
+            # Construct simple ortho matrix manually or use GLU?
+            # Creating a matrix manually for the shader:
+            # Ortho(-3, 3, -6, 1, -10, 10)
+            # X'= X / 3
+            # Y'= Z / 3.5 (mapped to -1~1 range)
+            
+            # Simplified: Let's rotate the view so Z becomes Y.
+            # Rotate X by 90 degrees.
+            # ModelView:
+            # 1 0 0 0
+            # 0 0 -1 0
+            # 0 1 0 0
+            # 0 0 0 1
+            
+            rot_x_90 = np.array([
+                1, 0, 0, 0,
+                0, 0, 1, 0, 
+                0, -1, 0, 0,
+                0, 0, 0, 1
+            ], dtype=np.float32)
+            
+            # Ortho Matrix (Column Major for OpenGL)
+            # l=-3, r=3, b=-6, t=1, n=-10, f=10
+            l, r, b, t, n, f = -3.0, 3.0, -6.0, 1.0, -10.0, 10.0
+            
+            ortho_mat = np.array([
+                2/(r-l), 0, 0, 0,
+                0, 2/(t-b), 0, 0,
+                0, 0, -2/(f-n), 0,
+                -(r+l)/(r-l), -(t+b)/(t-b), -(f+n)/(f-n), 1
+            ], dtype=np.float32)
+            
+            mvp_2d = np.dot(rot_x_90.reshape(4,4), ortho_mat.reshape(4,4)).flatten()
+            
+            glPointSize(3.0)
+            self.point_handler.draw(mvp_2d)
+
+            # Restoring logic
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
             self.print_text(left_w, wnd_h)
             self.mutex.release()  
