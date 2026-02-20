@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--web", action="store_true", help="Enable web streaming")
     parser.add_argument("--web-host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default: 8080)")
-    parser.add_argument("--web-fps", type=int, default=5, help="Web stream capture FPS (default: 5)")
+    parser.add_argument("--web-fps", type=int, default=60, help="Web stream capture FPS (default: 60)")
     return parser.parse_args()
 
 
@@ -52,7 +52,7 @@ def load_web_options(config):
         "enabled": bool(web_cfg.get("enabled", False)),
         "host": str(web_cfg.get("host", "0.0.0.0")),
         "port": int(web_cfg.get("port", 8080)),
-        "fps": int(web_cfg.get("fps", 5)),
+        "fps": int(web_cfg.get("fps", 60)),
     }
 
 
@@ -79,6 +79,8 @@ def load_lidar_receivers(config_path, config=None):
         offset_x = float(offset.get("x", item.get("offset_x", -0.12)))
         offset_y = float(offset.get("y", item.get("offset_y", 0.0)))
         offset_z = float(offset.get("z", item.get("offset_z", 0.0)))
+        rotation = item.get("rotation", {})
+        yaw_deg = float(rotation.get("yaw_deg", item.get("yaw_deg", 0.0)))
 
         receiver = lidar_thread.LidarReceiver(
             ip=ip,
@@ -87,6 +89,7 @@ def load_lidar_receivers(config_path, config=None):
             offset_x=offset_x,
             offset_y=offset_y,
             offset_z=offset_z,
+            yaw_deg=yaw_deg,
         )
         receivers.append(receiver)
 
@@ -139,10 +142,31 @@ def main():
     web_host = args.web_host if args.web else web_options["host"]
     web_port = args.web_port if args.web else web_options["port"]
     web_fps = args.web_fps if args.web else web_options["fps"]
+    profiles_path = os.path.abspath("lidar_profiles.json")
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
+        "yaw_step_deg": 0.5,  # degree
     }
+    console_action_map = {
+        ",": "select_prev_lidar",
+        ".": "select_next_lidar",
+        "a": "offset_x_minus",
+        "d": "offset_x_plus",
+        "r": "offset_y_plus",
+        "f": "offset_y_minus",
+        "w": "offset_z_minus",
+        "s": "offset_z_plus",
+        "j": "yaw_minus",
+        "l": "yaw_plus",
+        "[": "offset_step_down",
+        "]": "offset_step_up",
+        "-": "yaw_step_down",
+        "=": "yaw_step_up",
+        "x": "reset_selected_lidar_offset",
+        "c": "reset_selected_lidar_yaw",
+    }
+    profiles = {}
 
     try:
         # 1. Initialize ZED
@@ -185,6 +209,15 @@ def main():
         
         # 3. Start LiDAR Threads
         lidars = load_lidar_receivers(args.lidar_config, config=config)
+        try:
+            if os.path.exists(profiles_path):
+                with open(profiles_path, "r", encoding="utf-8") as f:
+                    profiles = json.load(f)
+                    if not isinstance(profiles, dict):
+                        profiles = {}
+        except Exception as e:
+            print(f"[Profile] Failed to load {profiles_path}: {e}")
+            profiles = {}
         print(f"Starting LiDAR Receivers... count={len(lidars)}")
         for lidar in lidars:
             lidar.start()
@@ -218,6 +251,7 @@ def main():
                     "fps": float(status.get("fps", 0.0)),
                     "point_count": int(status.get("point_count", 0)),
                     "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
+                    "yaw_deg": float(status.get("yaw_deg", 0.0)),
                 })
             selected_name = None
             selected = get_selected_lidar()
@@ -226,8 +260,19 @@ def main():
             return {
                 "selected_name": selected_name,
                 "step": float(offset_ui_state["step"]),
+                "yaw_step_deg": float(offset_ui_state["yaw_step_deg"]),
+                "profiles": sorted([str(k) for k in profiles.keys()]),
                 "lidars": items,
             }
+
+        def persist_profiles():
+            try:
+                with open(profiles_path, "w", encoding="utf-8") as f:
+                    json.dump(profiles, f, indent=2)
+                return True
+            except Exception as e:
+                print(f"[Profile] Failed to save {profiles_path}: {e}")
+                return False
 
         def apply_offset_control(action, payload):
             if not lidars:
@@ -259,6 +304,34 @@ def main():
                 offset_ui_state["step"] = max(0.001, min(1.0, step))
                 print(f"[Offset] step: {offset_ui_state['step']:.4f} m")
                 return True
+            if action == "yaw_step_down":
+                offset_ui_state["yaw_step_deg"] = max(0.1, float(offset_ui_state["yaw_step_deg"]) * 0.5)
+                print(f"[Yaw] step: {offset_ui_state['yaw_step_deg']:.2f} deg")
+                return True
+            if action == "yaw_step_up":
+                offset_ui_state["yaw_step_deg"] = min(20.0, float(offset_ui_state["yaw_step_deg"]) * 2.0)
+                print(f"[Yaw] step: {offset_ui_state['yaw_step_deg']:.2f} deg")
+                return True
+            if action == "yaw_set_step":
+                step = float(payload.get("yaw_step_deg", offset_ui_state["yaw_step_deg"]))
+                offset_ui_state["yaw_step_deg"] = max(0.1, min(20.0, step))
+                print(f"[Yaw] step: {offset_ui_state['yaw_step_deg']:.2f} deg")
+                return True
+            if action == "set_step_preset":
+                mode = str(payload.get("mode", ""))
+                if mode == "fine":
+                    offset_ui_state["step"] = 0.002
+                    offset_ui_state["yaw_step_deg"] = 0.2
+                elif mode == "normal":
+                    offset_ui_state["step"] = 0.01
+                    offset_ui_state["yaw_step_deg"] = 0.5
+                elif mode == "coarse":
+                    offset_ui_state["step"] = 0.05
+                    offset_ui_state["yaw_step_deg"] = 1.0
+                else:
+                    return False
+                print(f"[Adjust] preset={mode} step={offset_ui_state['step']:.3f}m yaw_step={offset_ui_state['yaw_step_deg']:.2f}deg")
+                return True
 
             selected = get_selected_lidar()
             if selected is None:
@@ -279,6 +352,12 @@ def main():
                 selected.add_offset(dz=step)
             elif action == "reset_selected_lidar_offset":
                 selected.set_offset(x=0.0, y=0.0, z=0.0)
+            elif action == "yaw_minus":
+                selected.add_yaw_deg(-float(offset_ui_state["yaw_step_deg"]))
+            elif action == "yaw_plus":
+                selected.add_yaw_deg(float(offset_ui_state["yaw_step_deg"]))
+            elif action == "reset_selected_lidar_yaw":
+                selected.set_yaw_deg(0.0)
             elif action == "lidar_offset_delta":
                 name = str(payload.get("name", ""))
                 axis = str(payload.get("axis", "")).lower()
@@ -306,11 +385,97 @@ def main():
                     z=payload.get("z", None),
                 )
                 return True
+            elif action == "lidar_yaw_delta":
+                name = str(payload.get("name", ""))
+                delta = float(payload.get("delta_deg", 0.0))
+                target = next((l for l in lidars if l.name == name), None)
+                if target is None:
+                    return False
+                target.add_yaw_deg(delta)
+                return True
+            elif action == "lidar_yaw_set":
+                name = str(payload.get("name", ""))
+                yaw_deg = float(payload.get("yaw_deg", 0.0))
+                target = next((l for l in lidars if l.name == name), None)
+                if target is None:
+                    return False
+                target.set_yaw_deg(yaw_deg)
+                return True
+            elif action == "lidar_axis_drag":
+                name = str(payload.get("name", ""))
+                axis = str(payload.get("axis", "")).lower()
+                pixels = float(payload.get("pixels", 0.0))
+                sensitivity = float(payload.get("sensitivity", 0.05))
+                target = next((l for l in lidars if l.name == name), None)
+                if target is None:
+                    return False
+                step_scale = max(0.001, min(1.0, abs(sensitivity)))
+                if axis == "yaw":
+                    delta = pixels * float(offset_ui_state["yaw_step_deg"]) * step_scale
+                    target.add_yaw_deg(delta)
+                elif axis == "x":
+                    target.add_offset(dx=pixels * float(offset_ui_state["step"]) * step_scale)
+                elif axis == "y":
+                    target.add_offset(dy=pixels * float(offset_ui_state["step"]) * step_scale)
+                elif axis == "z":
+                    target.add_offset(dz=pixels * float(offset_ui_state["step"]) * step_scale)
+                else:
+                    return False
+                return True
+            elif action == "profile_save":
+                name = str(payload.get("name", "")).strip()
+                if not name:
+                    return False
+                profiles[name] = {
+                    "step": float(offset_ui_state["step"]),
+                    "yaw_step_deg": float(offset_ui_state["yaw_step_deg"]),
+                    "lidars": {
+                        l.name: {
+                            "offset": l.get_offset(),
+                            "yaw_deg": l.get_yaw_deg(),
+                        }
+                        for l in lidars
+                    },
+                }
+                ok = persist_profiles()
+                if ok:
+                    print(f"[Profile] saved: {name}")
+                return ok
+            elif action == "profile_load":
+                name = str(payload.get("name", "")).strip()
+                data = profiles.get(name)
+                if not isinstance(data, dict):
+                    return False
+                offset_ui_state["step"] = max(0.001, min(1.0, float(data.get("step", offset_ui_state["step"]))))
+                offset_ui_state["yaw_step_deg"] = max(0.1, min(20.0, float(data.get("yaw_step_deg", offset_ui_state["yaw_step_deg"]))))
+                lidar_data = data.get("lidars", {})
+                for l in lidars:
+                    one = lidar_data.get(l.name, {})
+                    off = one.get("offset", {})
+                    l.set_offset(
+                        x=off.get("x", None),
+                        y=off.get("y", None),
+                        z=off.get("z", None),
+                    )
+                    if "yaw_deg" in one:
+                        l.set_yaw_deg(float(one.get("yaw_deg", 0.0)))
+                print(f"[Profile] loaded: {name}")
+                return True
+            elif action == "profile_delete":
+                name = str(payload.get("name", "")).strip()
+                if not name or name not in profiles:
+                    return False
+                del profiles[name]
+                ok = persist_profiles()
+                if ok:
+                    print(f"[Profile] deleted: {name}")
+                return ok
             else:
                 return False
 
             off = selected.get_offset()
-            print(f"[Offset] {selected.name} -> x={off['x']:+.3f}, y={off['y']:+.3f}, z={off['z']:+.3f} (step={step:.3f})")
+            yaw = selected.get_yaw_deg()
+            print(f"[Offset] {selected.name} -> x={off['x']:+.3f}, y={off['y']:+.3f}, z={off['z']:+.3f}, yaw={yaw:+.2f}deg (step={step:.3f}m/{offset_ui_state['yaw_step_deg']:.2f}deg)")
             return True
 
         viewer.set_command_callback(apply_offset_control)
@@ -339,6 +504,7 @@ def main():
 
             server.set_control_callback(on_web_control)
             server.set_state_callback(get_runtime_lidar_state)
+            server.set_jpeg_quality(70)
             server.start()
             viewer.set_frame_callback(server.update_frame, fps=web_fps)
             print(f"[Web] Stream bind: {web_host}:{web_port} (fps={web_fps})")
@@ -349,10 +515,16 @@ def main():
         print("  [LMB Drag on 3D view] : Pan merged map")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan")
-        print("  [N/M] : Select LiDAR (prev/next)")
-        print("  [H/L] [U/O] [J/K] : Offset X/Y/Z -/+")
-        print("  [[/]] : Offset step down/up")
-        print("  [0] : Reset selected LiDAR offset")
+        print("  [Console/OpenGL] ,/. : Select LiDAR prev/next")
+        print("  [Console/OpenGL] A/D : X -/+")
+        print("  [Console/OpenGL] R/F : Y +/-")
+        print("  [Console/OpenGL] W/S : Z -/+")
+        print("  [Console/OpenGL] J/L : Yaw -/+")
+        print("  [Console/OpenGL] [/] : XYZ step down/up")
+        print("  [Console/OpenGL] -/= : Yaw step down/up")
+        print("  [Console/OpenGL] X : Reset selected LiDAR offset")
+        print("  [Console/OpenGL] C : Reset selected LiDAR yaw")
+        print("  [Web] Fine/Normal/Coarse + Axis Drag + Profile Save/Load/Delete")
         print("  [Esc/Q] : Quit")
         
         # Objects
@@ -374,8 +546,23 @@ def main():
                             should_exit = True
                             continue
                         # consume extended key tail byte
-                        if key in (b"\x00", b"\xe0") and msvcrt.kbhit():
-                            msvcrt.getch()
+                        if key in (b"\x00", b"\xe0"):
+                            if msvcrt.kbhit():
+                                msvcrt.getch()
+                            continue
+
+                        # Console key control for LiDAR extrinsics.
+                        try:
+                            ch = key.decode("utf-8", errors="ignore").lower()
+                        except Exception:
+                            ch = ""
+                        action = console_action_map.get(ch)
+                        if action:
+                            apply_offset_control(action, {})
+                            continue
+                        if key in (b"q", b"Q", b"\x1b"):
+                            should_exit = True
+                            continue
                 except Exception:
                     pass
 
@@ -407,6 +594,7 @@ def main():
                         "connected": status.get("connected", False),
                         "fps": status.get("fps", 0.0),
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
+                        "yaw_deg": status.get("yaw_deg", 0.0),
                     })
 
                 viewer.update_lidar_multi(lidar_frames)

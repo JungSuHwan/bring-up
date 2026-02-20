@@ -456,6 +456,7 @@ class GLViewer:
             connected = bool(frame.get("connected", False))
             fps = float(frame.get("fps", 0.0))
             offset = frame.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
+            yaw_deg = float(frame.get("yaw_deg", 0.0))
 
             handler = self._ensure_lidar_handler(name)
             handler.update(points)
@@ -468,6 +469,7 @@ class GLViewer:
                     "y": float(offset.get("y", 0.0)),
                     "z": float(offset.get("z", 0.0)),
                 },
+                "yaw_deg": yaw_deg,
             }
             seen_names.add(name)
 
@@ -499,12 +501,12 @@ class GLViewer:
         self.change_state = False
         return copy_state
 
-    def set_frame_callback(self, callback, fps=5):
+    def set_frame_callback(self, callback, fps=60):
         self.frame_callback = callback
         if fps and fps > 0:
             self.frame_interval_sec = 1.0 / float(fps)
         else:
-            self.frame_interval_sec = 0.2
+            self.frame_interval_sec = 1.0 / 60.0
 
     def set_command_callback(self, callback):
         self.command_callback = callback
@@ -550,6 +552,11 @@ class GLViewer:
             "[": "offset_step_down",
             "]": "offset_step_up",
             "0": "reset_selected_lidar_offset",
+            ",": "yaw_minus",
+            ".": "yaw_plus",
+            ";": "yaw_step_down",
+            "'": "yaw_step_up",
+            "9": "reset_selected_lidar_yaw",
         }
         action = key_map.get(ch)
         if action:
@@ -734,7 +741,9 @@ class GLViewer:
             # Restoring logic
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-            self.print_text(left_w, wnd_h)
+            # Disable 3D overlay text rendering.
+            # (Keep function for potential future debugging use.)
+            # self.print_text(left_w, wnd_h)
 
             # Optional frame callback for web streaming.
             if self.frame_callback:
@@ -846,7 +855,8 @@ class GLViewer:
                 self.print_GL(-0.95, 0.9, "Hit Space Bar to stop spatial mapping.")
             glColor3f(0.65, 0.65, 0.65)
             self.print_GL(-0.95, 0.97, "Drag(LMB): Pan / Wheel: Zoom / R: Reset")
-            self.print_GL(-0.95, 0.04, "Offset keys: N/M lidar, H/L X, U/O Y, J/K Z, [/] step, 0 reset")
+            self.print_GL(-0.95, 0.04, "Keys: N/M lidar, H/L X, U/O Y, J/K Z, [/] step, 0 off-reset")
+            self.print_GL(-0.95, -0.02, "Yaw: ,/. -/+, ;/' step, 9 yaw-reset")
 
             positional_tracking_state_str = "POSITIONAL TRACKING STATE : "
             spatial_mapping_state_str = "SPATIAL MAPPING STATE : "
@@ -883,12 +893,13 @@ class GLViewer:
                 off_x = float(offset.get("x", 0.0))
                 off_y = float(offset.get("y", 0.0))
                 off_z = float(offset.get("z", 0.0))
+                yaw_deg = float(status.get("yaw_deg", 0.0))
 
                 glColor3f(color[0], color[1], color[2])
                 self.print_GL(
                     -0.95,
                     text_y,
-                    f"LIDAR {name}: {up_down} / pts={point_count} / fps={fps:4.1f} / off=({off_x:+.3f},{off_y:+.3f},{off_z:+.3f})",
+                    f"LIDAR {name}: {up_down} / pts={point_count} / fps={fps:4.1f} / off=({off_x:+.3f},{off_y:+.3f},{off_z:+.3f}) / yaw={yaw_deg:+.2f}",
                 )
                 text_y -= 0.06
                 if text_y < -0.95:

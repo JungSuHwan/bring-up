@@ -10,7 +10,7 @@ STX = b'\x02'
 ETX = b'\x03'
 
 class LidarReceiver(threading.Thread):
-    def __init__(self, ip='192.168.0.31', port=8000, name='lidar', offset_x=-0.12, offset_y=0.0, offset_z=0.0):
+    def __init__(self, ip='192.168.0.31', port=8000, name='lidar', offset_x=-0.12, offset_y=0.0, offset_z=0.0, yaw_deg=0.0):
         super().__init__()
         self.ip = ip
         self.port = port
@@ -29,6 +29,7 @@ class LidarReceiver(threading.Thread):
         self.offset_x = offset_x  # Left: Negative, Right: Positive
         self.offset_y = offset_y  # Down: Negative, Up: Positive
         self.offset_z = offset_z  # Forward: Negative, Backward: Positive (Default, can be changed)
+        self.yaw_deg = yaw_deg
 
     def get_offset(self):
         with self.lock:
@@ -52,6 +53,18 @@ class LidarReceiver(threading.Thread):
             self.offset_x += float(dx)
             self.offset_y += float(dy)
             self.offset_z += float(dz)
+
+    def get_yaw_deg(self):
+        with self.lock:
+            return float(self.yaw_deg)
+
+    def set_yaw_deg(self, yaw_deg):
+        with self.lock:
+            self.yaw_deg = float(yaw_deg)
+
+    def add_yaw_deg(self, dyaw_deg):
+        with self.lock:
+            self.yaw_deg += float(dyaw_deg)
 
     def run(self):
         self.running = True
@@ -184,6 +197,9 @@ class LidarReceiver(threading.Thread):
                 off_x = float(self.offset_x)
                 off_y = float(self.offset_y)
                 off_z = float(self.offset_z)
+                yaw_rad = math.radians(float(self.yaw_deg))
+            c = math.cos(yaw_rad)
+            s = math.sin(yaw_rad)
             angle_curr = angle_begin
             for r in ranges:
                 if r > 0.05:
@@ -245,9 +261,14 @@ class LidarReceiver(threading.Thread):
                     # x = -r * sin(rad)
                     # z = -r * cos(rad)
                     
-                    x_gl = (-r * math.sin(rad)) + off_x
+                    x_base = -r * math.sin(rad)
+                    z_base = -r * math.cos(rad)
+                    x_rot = (c * x_base) - (s * z_base)
+                    z_rot = (s * x_base) + (c * z_base)
+
+                    x_gl = x_rot + off_x
                     y_gl = off_y
-                    z_gl = (-r * math.cos(rad)) + off_z
+                    z_gl = z_rot + off_z
                     
                     points.append(x_gl) # x
                     points.append(y_gl) # y
@@ -287,4 +308,5 @@ class LidarReceiver(threading.Thread):
                     "y": float(self.offset_y),
                     "z": float(self.offset_z),
                 },
+                "yaw_deg": float(self.yaw_deg),
             }
