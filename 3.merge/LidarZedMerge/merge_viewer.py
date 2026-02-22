@@ -190,6 +190,21 @@ def main():
         if status != sl.ERROR_CODE.SUCCESS:
             print(f"Camera Open Failed: {status}")
             return
+        try:
+            cam_info = zed.get_camera_information()
+            cam_cfg = cam_info.camera_configuration
+            resolution = cam_cfg.resolution
+            fps = cam_cfg.fps
+            serial = getattr(cam_info, "serial_number", None)
+            if serial is None:
+                serial = getattr(cam_cfg, "serial_number", "unknown")
+            model = getattr(cam_info, "camera_model", "unknown")
+            print(
+                f"[ZED] Model={model} Serial={serial} "
+                f"Resolution={resolution.width}x{resolution.height} FPS={fps}"
+            )
+        except Exception as e:
+            print(f"[ZED] Model info unavailable: {e}")
 
         # 2. Enable Tracking & Mapping
         print("Enabling Tracking and Spatial Mapping...")
