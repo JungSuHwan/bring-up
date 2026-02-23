@@ -14,8 +14,13 @@ if os.name == "nt":
     import msvcrt
 
 def parse_args():
+    default_lidar_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
     parser = argparse.ArgumentParser(description="ZED + LiDAR merge viewer")
-    parser.add_argument("--lidar-config", default="lidar_config.json", help="LiDAR config path (default: lidar_config.json)")
+    parser.add_argument(
+        "--lidar-config",
+        default=default_lidar_config,
+        help="LiDAR config path (default: LidarZedMerge/lidar_config.json)",
+    )
     parser.add_argument("--web", action="store_true", help="Enable web streaming")
     parser.add_argument("--web-host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
     parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default: 8080)")
@@ -56,6 +61,58 @@ def load_web_options(config):
         "optimize_for_web_only": bool(web_cfg.get("optimize_for_web_only", True)),
         "jpeg_quality": int(web_cfg.get("jpeg_quality", 70)),
     }
+
+
+def load_zed_options(config):
+    zed_cfg = config.get("zed", {})
+    init_cfg = zed_cfg.get("init", {})
+    tracking_cfg = zed_cfg.get("tracking", {})
+    mapping_cfg = zed_cfg.get("mapping", {})
+    runtime_cfg = zed_cfg.get("runtime", {})
+
+    return {
+        "init": {
+            "depth_mode": str(init_cfg.get("depth_mode", "NEURAL")),
+            "coordinate_units": str(init_cfg.get("coordinate_units", "METER")),
+            "coordinate_system": str(init_cfg.get("coordinate_system", "RIGHT_HANDED_Y_UP")),
+            "depth_maximum_distance": float(init_cfg.get("depth_maximum_distance", 10.0)),
+            # None means "do not override SDK default FPS".
+            "camera_fps": init_cfg.get("camera_fps", None),
+        },
+        "tracking": {
+            "enable_area_memory": bool(tracking_cfg.get("enable_area_memory", False)),
+            "mode": tracking_cfg.get("mode", None),
+            "initial_position_m": {
+                "x": float(tracking_cfg.get("initial_position_m", {}).get("x", 0.0)),
+                "y": float(tracking_cfg.get("initial_position_m", {}).get("y", 0.30)),
+                "z": float(tracking_cfg.get("initial_position_m", {}).get("z", 0.0)),
+            },
+        },
+        "mapping": {
+            "map_type": str(mapping_cfg.get("map_type", "MESH")),
+            "save_texture": bool(mapping_cfg.get("save_texture", True)),
+            # preset string ("LOW/MEDIUM/HIGH") or numeric meter
+            "resolution": mapping_cfg.get("resolution", "MEDIUM"),
+            # preset string ("SHORT/MEDIUM/LONG") or numeric meter
+            "range": mapping_cfg.get("range", "MEDIUM"),
+            "use_chunk_only": bool(mapping_cfg.get("use_chunk_only", True)),
+        },
+        "runtime": {
+            # None means "do not override SDK default"
+            "measure3D_reference_frame": runtime_cfg.get("measure3D_reference_frame", None),
+        },
+    }
+
+
+def _enum_value(enum_owner, name, default_value=None, label="enum"):
+    if name is None:
+        return default_value
+    key = str(name).strip()
+    try:
+        return getattr(enum_owner, key)
+    except Exception:
+        print(f"[Config] Invalid {label} '{key}' -> fallback")
+        return default_value
 
 
 def load_lidar_alert_options(config):
@@ -188,6 +245,7 @@ def main():
     config = load_config_json(args.lidar_config)
     display_options = load_display_options(config)
     web_options = load_web_options(config)
+    zed_options = load_zed_options(config)
     pc_window_enabled = display_options["pc_window_enabled"]
     # CLI flag still works. If not given, config can enable web streaming.
     web_enabled = bool(args.web or web_options["enabled"])
@@ -220,10 +278,27 @@ def main():
         # 1. Initialize ZED
         print("Initializing ZED Camera...")
         init = sl.InitParameters()
-        init.depth_mode = sl.DEPTH_MODE.NEURAL
-        init.coordinate_units = sl.UNIT.METER
-        init.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
-        init.depth_maximum_distance = 10.0
+        init.depth_mode = _enum_value(
+            sl.DEPTH_MODE,
+            zed_options["init"]["depth_mode"],
+            default_value=sl.DEPTH_MODE.NEURAL,
+            label="zed.init.depth_mode",
+        )
+        init.coordinate_units = _enum_value(
+            sl.UNIT,
+            zed_options["init"]["coordinate_units"],
+            default_value=sl.UNIT.METER,
+            label="zed.init.coordinate_units",
+        )
+        init.coordinate_system = _enum_value(
+            sl.COORDINATE_SYSTEM,
+            zed_options["init"]["coordinate_system"],
+            default_value=sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP,
+            label="zed.init.coordinate_system",
+        )
+        init.depth_maximum_distance = float(zed_options["init"]["depth_maximum_distance"])
+        if zed_options["init"]["camera_fps"] is not None:
+            init.camera_fps = int(zed_options["init"]["camera_fps"])
         
         zed = sl.Camera()
         status = zed.open(init)
@@ -249,12 +324,24 @@ def main():
         # 2. Enable Tracking & Mapping
         print("Enabling Tracking and Spatial Mapping...")
         tracking_params = sl.PositionalTrackingParameters()
-        tracking_params.enable_area_memory = False
+        tracking_params.enable_area_memory = bool(zed_options["tracking"]["enable_area_memory"])
+        tracking_mode = _enum_value(
+            sl.POSITIONAL_TRACKING_MODE,
+            zed_options["tracking"]["mode"],
+            default_value=None,
+            label="zed.tracking.mode",
+        )
+        if tracking_mode is not None:
+            tracking_params.mode = tracking_mode
         
         # Set initial position (Camera at 30cm height)
         initial_position = sl.Transform()
         initial_translation = sl.Translation()
-        initial_translation.init_vector(0, 0.30, 0) # x, y, z
+        initial_translation.init_vector(
+            float(zed_options["tracking"]["initial_position_m"]["x"]),
+            float(zed_options["tracking"]["initial_position_m"]["y"]),
+            float(zed_options["tracking"]["initial_position_m"]["z"]),
+        ) # x, y, z
         initial_position.set_translation(initial_translation)
         tracking_params.set_initial_world_transform(initial_position)
         
@@ -264,11 +351,38 @@ def main():
             return
         
         mapping_params = sl.SpatialMappingParameters()
-        mapping_params.map_type = sl.SPATIAL_MAP_TYPE.MESH
-        mapping_params.save_texture = True
-        mapping_params.resolution_meter = mapping_params.get_resolution_preset(sl.MAPPING_RESOLUTION.MEDIUM)
-        mapping_params.range_meter = mapping_params.get_range_preset(sl.MAPPING_RANGE.MEDIUM)
-        mapping_params.use_chunk_only = True
+        mapping_params.map_type = _enum_value(
+            sl.SPATIAL_MAP_TYPE,
+            zed_options["mapping"]["map_type"],
+            default_value=sl.SPATIAL_MAP_TYPE.MESH,
+            label="zed.mapping.map_type",
+        )
+        mapping_params.save_texture = bool(zed_options["mapping"]["save_texture"])
+        mapping_params.use_chunk_only = bool(zed_options["mapping"]["use_chunk_only"])
+
+        res_cfg = zed_options["mapping"]["resolution"]
+        if isinstance(res_cfg, str):
+            res_preset = _enum_value(
+                sl.MAPPING_RESOLUTION,
+                res_cfg,
+                default_value=sl.MAPPING_RESOLUTION.MEDIUM,
+                label="zed.mapping.resolution",
+            )
+            mapping_params.resolution_meter = mapping_params.get_resolution_preset(res_preset)
+        else:
+            mapping_params.resolution_meter = float(res_cfg)
+
+        range_cfg = zed_options["mapping"]["range"]
+        if isinstance(range_cfg, str):
+            range_preset = _enum_value(
+                sl.MAPPING_RANGE,
+                range_cfg,
+                default_value=sl.MAPPING_RANGE.MEDIUM,
+                label="zed.mapping.range",
+            )
+            mapping_params.range_meter = mapping_params.get_range_preset(range_preset)
+        else:
+            mapping_params.range_meter = float(range_cfg)
         
         # 3. Start LiDAR Threads
         lidars = load_lidar_receivers(args.lidar_config, config=config)
@@ -732,6 +846,15 @@ def main():
         image = sl.Mat()
         pose = sl.Pose()
         runtime_parameters = sl.RuntimeParameters()
+        runtime_ref = _enum_value(
+            sl.REFERENCE_FRAME,
+            zed_options["runtime"]["measure3D_reference_frame"],
+            default_value=None,
+            label="zed.runtime.measure3D_reference_frame",
+        )
+        if runtime_ref is not None:
+            runtime_parameters.measure3D_reference_frame = runtime_ref
+        print_zed_settings_snapshot("Applied", init, tracking_params, mapping_params, runtime_parameters)
         
         last_call = time.time()
         should_exit = False
