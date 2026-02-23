@@ -144,6 +144,39 @@ def reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params):
         raise RuntimeError(f"Enable spatial mapping failed after reset: {err}")
 
 
+def print_zed_settings_snapshot(tag, init_params, tracking_params, mapping_params, runtime_params):
+    camera_fps = getattr(init_params, "camera_fps", None)
+    depth_max = getattr(init_params, "depth_maximum_distance", None)
+    enable_area_memory = getattr(tracking_params, "enable_area_memory", None)
+    tracking_mode = getattr(tracking_params, "mode", None)
+    map_type = getattr(mapping_params, "map_type", None)
+    resolution_meter = getattr(mapping_params, "resolution_meter", None)
+    range_meter = getattr(mapping_params, "range_meter", None)
+    use_chunk_only = getattr(mapping_params, "use_chunk_only", None)
+    save_texture = getattr(mapping_params, "save_texture", None)
+    measure_ref = getattr(runtime_params, "measure3D_reference_frame", None)
+
+    print(f"[ZED {tag}] [1] camera_fps={camera_fps if camera_fps is not None else 'SDK default'}")
+    print(f"[ZED {tag}] [2] depth_maximum_distance={depth_max if depth_max is not None else 'SDK default'}")
+    print(
+        f"[ZED {tag}] [3] positional_tracking: "
+        f"enable_area_memory={enable_area_memory if enable_area_memory is not None else 'SDK default'}, "
+        f"mode={tracking_mode if tracking_mode is not None else 'SDK default'}"
+    )
+    print(
+        f"[ZED {tag}] [5] spatial_mapping: "
+        f"map_type={map_type if map_type is not None else 'SDK default'}, "
+        f"resolution_meter={resolution_meter if resolution_meter is not None else 'SDK default'}, "
+        f"range_meter={range_meter if range_meter is not None else 'SDK default'}, "
+        f"use_chunk_only={use_chunk_only if use_chunk_only is not None else 'SDK default'}, "
+        f"save_texture={save_texture if save_texture is not None else 'SDK default'}"
+    )
+    print(
+        f"[ZED {tag}] [6] runtime.measure3D_reference_frame="
+        f"{measure_ref if measure_ref is not None else 'SDK default'}"
+    )
+
+
 def main():
     args = parse_args()
     server = None
@@ -177,6 +210,13 @@ def main():
     config_save_interval_sec = 0.5
 
     try:
+        # Print SDK-default snapshots before any explicit program override.
+        default_init = sl.InitParameters()
+        default_tracking = sl.PositionalTrackingParameters()
+        default_mapping = sl.SpatialMappingParameters()
+        default_runtime = sl.RuntimeParameters()
+        print_zed_settings_snapshot("Default", default_init, default_tracking, default_mapping, default_runtime)
+
         # 1. Initialize ZED
         print("Initializing ZED Camera...")
         init = sl.InitParameters()
