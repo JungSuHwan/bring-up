@@ -580,6 +580,7 @@ class GLViewer:
             return
 
         key_map = {
+            "s": "save_spatial_map",
             "n": "select_prev_lidar",
             "m": "select_next_lidar",
             "h": "offset_x_minus",

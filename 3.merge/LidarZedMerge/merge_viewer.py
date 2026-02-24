@@ -298,6 +298,7 @@ def main():
     last_config_save_time = 0.0
     config_save_interval_sec = 0.5
     console_input_state = None
+    save_map_requested = False
 
     try:
         console_input_state = setup_console_input()
@@ -850,12 +851,17 @@ def main():
             return True
 
         def dispatch_control(action, payload):
+            nonlocal save_map_requested
+            if action == "save_spatial_map":
+                save_map_requested = True
+                return True
             ok = apply_offset_control(action, payload)
             if ok:
                 update_control_status()
             return ok
 
         update_control_status()
+        viewer.set_command_callback(dispatch_control)
 
         if web_enabled:
             server = web_stream.WebFrameServer(host=web_host, port=web_port)
@@ -886,6 +892,7 @@ def main():
         
         print("\n=== Controls ===")
         print("  [Space] : Start/Stop spatial mapping (RGB overlay)")
+        print("  [S] : Save current spatial map (mesh_gen.obj)")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan (viewer window)")
         print("  [External UI/API] Use /control for x/y/z/yaw/step realtime control")
@@ -911,6 +918,7 @@ def main():
 
         while viewer.is_available() and not should_exit:
             force_toggle_mapping = False
+            force_save_map = False
             if os.name == "nt":
                 try:
                     if msvcrt.kbhit():
@@ -930,6 +938,8 @@ def main():
                             continue
                         if key == b" ":
                             force_toggle_mapping = True
+                        if key in (b"s", b"S"):
+                            force_save_map = True
                 except Exception:
                     pass
             else:
@@ -939,8 +949,42 @@ def main():
                     continue
                 if key == b" ":
                     force_toggle_mapping = True
+                if key in (b"s", b"S"):
+                    force_save_map = True
 
             if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+                if save_map_requested or force_save_map:
+                    save_map_requested = False
+                    force_save_map = False
+                    if not mapping_activated:
+                        print("[ZED] Spatial mapping is not active. Press [Space] first.")
+                    else:
+                        try:
+                            # Match the sample flow: extract whole map, optional mesh filter/texture, then save.
+                            zed.extract_whole_spatial_map(pymesh)
+                            if draw_mesh_mode and isinstance(pymesh, sl.Mesh):
+                                filter_params = sl.MeshFilterParameters()
+                                filter_params.set(sl.MESH_FILTER.MEDIUM)
+                                pymesh.filter(filter_params, True)
+                                viewer.clear_current_mesh()
+                                if mapping_params.save_texture:
+                                    print(f"Save texture set to : {mapping_params.save_texture}")
+                                    pymesh.apply_texture(sl.MESH_TEXTURE_FORMAT.RGBA)
+                            filepath = "mesh_gen.obj"
+                            status = pymesh.save(filepath)
+                            if status:
+                                print(f"[ZED] Mesh saved under {filepath}")
+                            else:
+                                print(f"[ZED] Failed to save mesh under {filepath}")
+                            try:
+                                zed.disable_spatial_mapping()
+                            except Exception:
+                                pass
+                            mapping_activated = False
+                            print("[ZED] Spatial mapping stopped after save.")
+                        except Exception as e:
+                            print(f"[ZED] Failed to save spatial map: {e}")
+
                 if pending_config_save and (time.time() - last_config_save_time) >= config_save_interval_sec:
                     if persist_lidar_config():
                         pending_config_save = False
