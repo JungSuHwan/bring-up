@@ -11,8 +11,48 @@ import web_stream
 
 if os.name == "nt":
     import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
+
+
+def setup_console_input():
+    if os.name == "nt":
+        return None
+    if not sys.stdin.isatty():
+        return None
+    try:
+        fd = sys.stdin.fileno()
+        old_termios = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        return {"fd": fd, "old_termios": old_termios}
+    except Exception as e:
+        print(f"[Input] Failed to enable non-blocking console input: {e}")
+        return None
+
+
+def restore_console_input(state):
+    if os.name == "nt" or not state:
+        return
+    try:
+        termios.tcsetattr(state["fd"], termios.TCSADRAIN, state["old_termios"])
+    except Exception:
+        pass
+
+
+def poll_console_key(state):
+    if not state:
+        return None
+    try:
+        ready, _, _ = select.select([state["fd"]], [], [], 0)
+        if not ready:
+            return None
+        return os.read(state["fd"], 1)
+    except Exception:
+        return None
 
 
 def load_config_json(config_path):
@@ -257,8 +297,10 @@ def main():
     pending_config_save = False
     last_config_save_time = 0.0
     config_save_interval_sec = 0.5
+    console_input_state = None
 
     try:
+        console_input_state = setup_console_input()
         # Print SDK-default snapshots before any explicit program override.
         default_init = sl.InitParameters()
         default_tracking = sl.PositionalTrackingParameters()
@@ -890,6 +932,13 @@ def main():
                             force_toggle_mapping = True
                 except Exception:
                     pass
+            else:
+                key = poll_console_key(console_input_state)
+                if key in (b"q", b"Q", b"\x1b"):
+                    should_exit = True
+                    continue
+                if key == b" ":
+                    force_toggle_mapping = True
 
             if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
                 if pending_config_save and (time.time() - last_config_save_time) >= config_save_interval_sec:
@@ -970,6 +1019,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[System] KeyboardInterrupt received -> exiting")
     finally:
+        restore_console_input(console_input_state)
         print("Exiting...")
         if pending_config_save:
             persist_lidar_config()

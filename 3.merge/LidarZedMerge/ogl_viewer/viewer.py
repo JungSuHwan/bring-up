@@ -557,16 +557,26 @@ class GLViewer:
             self.image_handler.close()      
 
     def keyReleasedCallback(self, key, x, y):
-        if ord(key) == 113 or ord(key) == 27:   # 'q' key
-            self.close_func()
-        if ord(key) == 114:                     # 'r' key
-            self.reset_pan_zoom()
-
-        if not self.command_callback:
-            return
         try:
             ch = key.decode("utf-8").lower() if isinstance(key, (bytes, bytearray)) else chr(ord(key)).lower()
         except Exception:
+            return
+        try:
+            key_code = key[0] if isinstance(key, (bytes, bytearray)) else ord(key)
+        except Exception:
+            key_code = -1
+
+        if ch == "q" or key_code == 27:   # 'q' or ESC
+            self.close_func()
+            return
+        if ch == "r":
+            self.reset_pan_zoom()
+            return
+        if ch == " ":
+            self.change_state = True
+            return
+
+        if not self.command_callback:
             return
 
         key_map = {
