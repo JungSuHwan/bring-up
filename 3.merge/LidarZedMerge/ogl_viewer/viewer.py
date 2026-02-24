@@ -316,6 +316,7 @@ class GLViewer:
         self.drag_active = False
         self.last_mouse_x = 0
         self.last_mouse_y = 0
+        self.rgb_aspect_ratio = 16.0 / 9.0
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
@@ -344,6 +345,8 @@ class GLViewer:
 
         # Initialize image renderer
         self.image_handler.initialize(_params.image_size)
+        if _params.image_size.height > 0:
+            self.rgb_aspect_ratio = float(_params.image_size.width) / float(_params.image_size.height)
         
         self.init_mesh(_mesh, _create_mesh)
 
@@ -676,8 +679,10 @@ class GLViewer:
                 lidar_h = wnd_h - rgb_h
 
                 # Top-Left: RGB
-                glViewport(0, lidar_h, left_w, rgb_h)
+                rgb_vp = self._fit_viewport_keep_aspect(0, lidar_h, left_w, rgb_h, self.rgb_aspect_ratio)
+                glViewport(rgb_vp[0], rgb_vp[1], rgb_vp[2], rgb_vp[3])
                 self.image_handler.draw(self.image_handler.tex_rgb)
+                self.draw_mesh_overlay(include_lidar=False, apply_pan=False)
 
                 # Bottom-Left: LiDAR 2D View
                 glViewport(0, 0, left_w, lidar_h)
@@ -808,6 +813,24 @@ class GLViewer:
             glutSwapBuffers()
             glutPostRedisplay()
 
+    def _fit_viewport_keep_aspect(self, x, y, w, h, aspect):
+        # Fit a source aspect ratio into a destination box using letterboxing.
+        box_w = max(1, int(w))
+        box_h = max(1, int(h))
+        a = float(aspect) if aspect and aspect > 0 else (16.0 / 9.0)
+
+        fit_w = box_w
+        fit_h = int(round(float(fit_w) / a))
+        if fit_h > box_h:
+            fit_h = box_h
+            fit_w = int(round(float(fit_h) * a))
+
+        fit_w = max(1, min(box_w, fit_w))
+        fit_h = max(1, min(box_h, fit_h))
+        off_x = int((box_w - fit_w) * 0.5)
+        off_y = int((box_h - fit_h) * 0.5)
+        return int(x) + off_x, int(y) + off_y, fit_w, fit_h
+
     def draw_control_status(self, left_w, wnd_h):
         if not self.control_status_text:
             return
@@ -839,48 +862,53 @@ class GLViewer:
             self.new_chunks = False
             self.chunks_pushed = True
 
-    def draw_3d_mesh(self):  
+    def draw_3d_mesh(self):
         if self.available:
-            
-            # If the Positional tracking is good, we can draw the mesh over the current image
-            # Note: We are now drawing in a separate viewport, not Overlay.
-            # But we still use the camera projection (which might look skewed if aspect ratio is different)
-            
-            if self.tracking_state == sl.POSITIONAL_TRACKING_STATE.OK and len(self.sub_maps) > 0:
-                # Draw the mesh in GL_TRIANGLES with a polygon mode in line (wire)
-                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            self.draw_mesh_overlay(include_lidar=True, apply_pan=True)
 
-                # Send the projection and the Pose to the GLSL shader to make the projection of the 2D image
-                tmp = self.pose
-                tmp.inverse()
-                view_np = np.array(tmp.m, dtype=np.float32)
-                pan_mat = np.identity(4, dtype=np.float32)
-                pan_mat[0, 3] = float(self.pan_offset[0])
-                pan_mat[1, 3] = float(self.pan_offset[1])
-                pan_mat[2, 3] = float(self.pan_offset[2])
-                vpMat = np.dot(np.array(self.projection.m, dtype=np.float32), np.dot(pan_mat, view_np)).flatten()
-                
-                glUseProgram(self.shader_image.get_program_id())
-                glUniformMatrix4fv(self.shader_MVP, 1, GL_TRUE, (GLfloat * len(vpMat))(*vpMat))
-                glUniform3fv(self.shader_color_loc, 1, (GLfloat * len(self.vertices_color))(*self.vertices_color))
-        
-                for m in range(len(self.sub_maps)):
-                    self.sub_maps[m].draw(self.draw_mesh)
+    def draw_mesh_overlay(self, include_lidar, apply_pan):
+        if self.tracking_state != sl.POSITIONAL_TRACKING_STATE.OK:
+            return
+        if self.mapping_state == sl.SPATIAL_MAPPING_STATE.NOT_ENABLED:
+            return
+        if len(self.sub_maps) == 0:
+            return
 
-                glUseProgram(0)
-                
-                # Draw Lidar Points
-                glPointSize(5.0) # Make them visible
-                for name in self.lidar_order:
-                    # Keep per-lidar color consistent with 2D view.
-                    self.lidar_handlers[name].draw(vpMat)
-                # Overlay threshold-hit points in red.
-                glPointSize(7.0)
-                for name in self.lidar_order:
-                    if name in self.lidar_alert_handlers:
-                        self.lidar_alert_handlers[name].draw(vpMat)
-                
-                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+
+        # Copy pose before inverse to avoid mutating shared pose state.
+        tmp = sl.Transform(self.pose)
+        tmp.inverse()
+        if apply_pan:
+            view_np = np.array(tmp.m, dtype=np.float32)
+            pan_mat = np.identity(4, dtype=np.float32)
+            pan_mat[0, 3] = float(self.pan_offset[0])
+            pan_mat[1, 3] = float(self.pan_offset[1])
+            pan_mat[2, 3] = float(self.pan_offset[2])
+            vpMat = np.dot(np.array(self.projection.m, dtype=np.float32), np.dot(pan_mat, view_np)).flatten()
+        else:
+            proj = (self.projection * tmp).m
+            vpMat = proj.flatten()
+
+        glUseProgram(self.shader_image.get_program_id())
+        glUniformMatrix4fv(self.shader_MVP, 1, GL_TRUE, (GLfloat * len(vpMat))(*vpMat))
+        glUniform3fv(self.shader_color_loc, 1, (GLfloat * len(self.vertices_color))(*self.vertices_color))
+
+        for m in range(len(self.sub_maps)):
+            self.sub_maps[m].draw(self.draw_mesh)
+
+        glUseProgram(0)
+
+        if include_lidar:
+            glPointSize(5.0)
+            for name in self.lidar_order:
+                self.lidar_handlers[name].draw(vpMat)
+            glPointSize(7.0)
+            for name in self.lidar_order:
+                if name in self.lidar_alert_handlers:
+                    self.lidar_alert_handlers[name].draw(vpMat)
+
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
     def print_text(self, left_w, wnd_h):
         if self.available:

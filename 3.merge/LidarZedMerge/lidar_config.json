@@ -4,12 +4,13 @@
       "depth_mode": "NEURAL",
       "coordinate_units": "METER",
       "coordinate_system": "RIGHT_HANDED_Y_UP",
-      "depth_maximum_distance": 10.0,
+      "depth_minimum_distance": null,
+      "depth_maximum_distance": 8.0,
       "camera_fps": null
     },
     "tracking": {
-      "enable_area_memory": false,
-      "mode": "GEN_3",
+      "enable_area_memory": true,
+      "mode": "GEN_1",
       "initial_position_m": {
         "x": 0.0,
         "y": 0.3,
@@ -18,10 +19,12 @@
     },
     "mapping": {
       "map_type": "MESH",
-      "save_texture": true,
+      "save_texture": false,
       "resolution": "MEDIUM",
       "range": "MEDIUM",
-      "use_chunk_only": true
+      "use_chunk_only": true,
+      "max_memory_usage": 2048,
+      "stability_counter": 4
     },
     "runtime": {
       "measure3D_reference_frame": "WORLD"

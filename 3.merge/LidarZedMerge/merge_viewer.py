@@ -62,6 +62,8 @@ def load_zed_options(config):
             "depth_mode": str(init_cfg.get("depth_mode", "NEURAL")),
             "coordinate_units": str(init_cfg.get("coordinate_units", "METER")),
             "coordinate_system": str(init_cfg.get("coordinate_system", "RIGHT_HANDED_Y_UP")),
+            # None means "AUTO / SDK default".
+            "depth_minimum_distance": init_cfg.get("depth_minimum_distance", None),
             "depth_maximum_distance": float(init_cfg.get("depth_maximum_distance", 10.0)),
             # None means "do not override SDK default FPS".
             "camera_fps": init_cfg.get("camera_fps", None),
@@ -83,6 +85,9 @@ def load_zed_options(config):
             # preset string ("SHORT/MEDIUM/LONG") or numeric meter
             "range": mapping_cfg.get("range", "MEDIUM"),
             "use_chunk_only": bool(mapping_cfg.get("use_chunk_only", True)),
+            # Optional advanced params (SDK defaults when None)
+            "max_memory_usage": mapping_cfg.get("max_memory_usage", None),
+            "stability_counter": mapping_cfg.get("stability_counter", None),
         },
         "runtime": {
             # None means "do not override SDK default"
@@ -283,6 +288,8 @@ def main():
             label="zed.init.coordinate_system",
         )
         init.depth_maximum_distance = float(zed_options["init"]["depth_maximum_distance"])
+        if zed_options["init"]["depth_minimum_distance"] is not None:
+            init.depth_minimum_distance = float(zed_options["init"]["depth_minimum_distance"])
         if zed_options["init"]["camera_fps"] is not None:
             init.camera_fps = int(zed_options["init"]["camera_fps"])
         
@@ -345,6 +352,10 @@ def main():
         )
         mapping_params.save_texture = bool(zed_options["mapping"]["save_texture"])
         mapping_params.use_chunk_only = bool(zed_options["mapping"]["use_chunk_only"])
+        if zed_options["mapping"]["max_memory_usage"] is not None:
+            mapping_params.max_memory_usage = int(zed_options["mapping"]["max_memory_usage"])
+        if zed_options["mapping"]["stability_counter"] is not None:
+            mapping_params.stability_counter = int(zed_options["mapping"]["stability_counter"])
 
         res_cfg = zed_options["mapping"]["resolution"]
         if isinstance(res_cfg, str):
@@ -379,11 +390,15 @@ def main():
         # 4. Initialize Viewer
         camera_info = zed.get_camera_information()
         viewer = gl.GLViewer()
-        pymesh = sl.Mesh()
+        draw_mesh_mode = (mapping_params.map_type == sl.SPATIAL_MAP_TYPE.MESH)
+        if draw_mesh_mode:
+            pymesh = sl.Mesh()
+        else:
+            pymesh = sl.FusedPointCloud()
         viewer.init(
             camera_info.camera_configuration.calibration_parameters.left_cam,
             pymesh,
-            True,
+            draw_mesh_mode,
             show_window=pc_window_enabled,
         )
         web_render_optimized = bool(web_enabled and (not pc_window_enabled) and web_optimize_for_web_only)
@@ -800,9 +815,6 @@ def main():
 
         update_control_status()
 
-        reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params)
-        print("[ZED] Spatial mapping session reset complete (fresh start).")
-
         if web_enabled:
             server = web_stream.WebFrameServer(host=web_host, port=web_port)
             def on_web_control(action, payload):
@@ -831,6 +843,7 @@ def main():
             print(f"[Web] Open on this PC: http://localhost:{web_port}/")
         
         print("\n=== Controls ===")
+        print("  [Space] : Start/Stop spatial mapping (RGB overlay)")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan (viewer window)")
         print("  [External UI/API] Use /control for x/y/z/yaw/step realtime control")
@@ -851,9 +864,11 @@ def main():
         print_zed_settings_snapshot("Applied", init, tracking_params, mapping_params, runtime_parameters)
         
         last_call = time.time()
+        mapping_activated = False
         should_exit = False
 
         while viewer.is_available() and not should_exit:
+            force_toggle_mapping = False
             if os.name == "nt":
                 try:
                     if msvcrt.kbhit():
@@ -871,6 +886,8 @@ def main():
                         if key in (b"q", b"Q", b"\x1b"):
                             should_exit = True
                             continue
+                        if key == b" ":
+                            force_toggle_mapping = True
                 except Exception:
                     pass
 
@@ -884,17 +901,21 @@ def main():
                 if not web_render_optimized:
                     zed.retrieve_image(image, sl.VIEW.LEFT)
                 tracking_state = zed.get_position(pose)
-                mapping_state = zed.get_spatial_mapping_state()
+                if mapping_activated:
+                    mapping_state = zed.get_spatial_mapping_state()
+                else:
+                    mapping_state = sl.SPATIAL_MAPPING_STATE.NOT_ENABLED
                 
                 # (B) Spatial Mapping Update
-                duration = time.time() - last_call
-                if duration > 0.2 and viewer.chunks_updated():
-                    zed.request_spatial_map_async()
-                    last_call = time.time()
+                if mapping_activated:
+                    duration = time.time() - last_call
+                    if duration > 0.2 and viewer.chunks_updated():
+                        zed.request_spatial_map_async()
+                        last_call = time.time()
                     
-                if zed.get_spatial_map_request_status_async() == sl.ERROR_CODE.SUCCESS:
-                    zed.retrieve_spatial_map_async(pymesh)
-                    viewer.update_chunks()
+                    if zed.get_spatial_map_request_status_async() == sl.ERROR_CODE.SUCCESS:
+                        zed.retrieve_spatial_map_async(pymesh)
+                        viewer.update_chunks()
                     
                 # (C) LiDAR Data Update (multi-lidar)
                 lidar_frames = []
@@ -915,7 +936,29 @@ def main():
                 viewer.update_lidar_multi(lidar_frames)
                     
                 # (D) Update View
-                viewer.update_view(image if not web_render_optimized else None, None, pose.pose_data(), tracking_state, mapping_state)
+                change_state = viewer.update_view(
+                    image if not web_render_optimized else None,
+                    None,
+                    pose.pose_data(),
+                    tracking_state,
+                    mapping_state,
+                )
+                if change_state or force_toggle_mapping:
+                    if not mapping_activated:
+                        try:
+                            reset_spatial_mapping_session(zed, viewer, pymesh, mapping_params)
+                            mapping_activated = True
+                            last_call = time.time()
+                            print("[ZED] Spatial mapping started.")
+                        except Exception as e:
+                            print(f"[ZED] Failed to start spatial mapping: {e}")
+                    else:
+                        try:
+                            zed.disable_spatial_mapping()
+                            mapping_activated = False
+                            print("[ZED] Spatial mapping stopped.")
+                        except Exception as e:
+                            print(f"[ZED] Failed to stop spatial mapping: {e}")
 
                 # When PC window is hidden, force one render pass so web stream receives
                 # the merged OpenGL frame (RGB + mesh + lidar) instead of raw camera image.
