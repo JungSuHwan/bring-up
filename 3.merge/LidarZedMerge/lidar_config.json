@@ -41,7 +41,7 @@
   "lidar_2d_alert_threshold": {
     "enabled": true,
     "min_m": 0.0,
-    "max_m": 0.8
+    "max_m": 0.5
   },
   "lidars": [
     {
