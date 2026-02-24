@@ -1,9 +1,7 @@
 import sys
 import time
-import signal
 import json
 import os
-import numpy as np
 import pyzed.sl as sl
 import ogl_viewer.viewer as gl
 import lidar_thread
@@ -84,9 +82,6 @@ def load_web_options(config):
         "enabled": bool(web_cfg.get("enabled", False)),
         "host": str(web_cfg.get("host", "0.0.0.0")),
         "port": int(web_cfg.get("port", 8080)),
-        "fps": int(web_cfg.get("fps", 60)),
-        "optimize_for_web_only": bool(web_cfg.get("optimize_for_web_only", True)),
-        "jpeg_quality": int(web_cfg.get("jpeg_quality", 70)),
     }
 
 
@@ -282,9 +277,6 @@ def main():
     web_enabled = bool(web_options["enabled"])
     web_host = web_options["host"]
     web_port = web_options["port"]
-    web_fps = web_options["fps"]
-    web_optimize_for_web_only = bool(web_options["optimize_for_web_only"])
-    web_jpeg_quality = int(web_options["jpeg_quality"])
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
@@ -444,12 +436,7 @@ def main():
             draw_mesh_mode,
             show_window=pc_window_enabled,
         )
-        web_render_optimized = bool(web_enabled and (not pc_window_enabled) and web_optimize_for_web_only)
-        if web_render_optimized:
-            viewer.set_stream_3d_only(True)
         print(f"[Display] PC window enabled: {pc_window_enabled}")
-        if web_render_optimized:
-            print("[Display] Web-only optimization enabled: 3D-only render path")
 
         def get_selected_lidar():
             if not lidars:
@@ -868,26 +855,12 @@ def main():
             def on_web_control(action, payload):
                 if viewer is None:
                     return False
-                if action == "pan_pixels":
-                    dx = float(payload.get("dx", 0.0))
-                    dy = float(payload.get("dy", 0.0))
-                    viewer.pan_by_pixels(dx, dy)
-                    return True
-                if action == "zoom_steps":
-                    steps = float(payload.get("steps", 0.0))
-                    viewer.zoom_by_steps(steps)
-                    return True
-                if action == "reset_view":
-                    viewer.reset_pan_zoom()
-                    return True
                 return dispatch_control(action, payload)
 
             server.set_control_callback(on_web_control)
             server.set_state_callback(get_runtime_lidar_state)
-            server.set_jpeg_quality(web_jpeg_quality)
             server.start()
-            viewer.set_frame_callback(server.update_frame, fps=web_fps)
-            print(f"[Web] Stream bind: {web_host}:{web_port} (fps={web_fps})")
+            print(f"[Web] Control panel bind: {web_host}:{web_port}")
             print(f"[Web] Open on this PC: http://localhost:{web_port}/")
         
         print("\n=== Controls ===")
@@ -991,8 +964,7 @@ def main():
                         last_config_save_time = time.time()
                 
                 # (A) ZED Data
-                if not web_render_optimized:
-                    zed.retrieve_image(image, sl.VIEW.LEFT)
+                zed.retrieve_image(image, sl.VIEW.LEFT)
                 tracking_state = zed.get_position(pose)
                 if mapping_activated:
                     mapping_state = zed.get_spatial_mapping_state()
@@ -1030,7 +1002,7 @@ def main():
                     
                 # (D) Update View
                 change_state = viewer.update_view(
-                    image if not web_render_optimized else None,
+                    image,
                     None,
                     pose.pose_data(),
                     tracking_state,
@@ -1053,13 +1025,6 @@ def main():
                         except Exception as e:
                             print(f"[ZED] Failed to stop spatial mapping: {e}")
 
-                # When PC window is hidden, force one render pass so web stream receives
-                # the merged OpenGL frame (RGB + mesh + lidar) instead of raw camera image.
-                if web_enabled and (not pc_window_enabled):
-                    try:
-                        viewer.draw_callback()
-                    except Exception:
-                        pass
     except KeyboardInterrupt:
         print("\n[System] KeyboardInterrupt received -> exiting")
     finally:

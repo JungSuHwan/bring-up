@@ -8,7 +8,6 @@ import sys
 import array
 import math
 import ctypes
-import time
 import pyzed.sl as sl
 
 M_PI = 3.1415926
@@ -290,12 +289,8 @@ class GLViewer:
         self.pose = sl.Transform().set_identity()
         self.tracking_state = sl.POSITIONAL_TRACKING_STATE.OFF
         self.mapping_state = sl.SPATIAL_MAPPING_STATE.NOT_ENABLED
-        self.frame_callback = None
         self.command_callback = None
-        self.frame_interval_sec = 0.2
-        self.last_frame_capture_time = 0.0
         self.control_status_text = ""
-        self.stream_3d_only = False
         self.layout_left_ratio = 0.42
         self.layout_rgb_ratio = 0.64
         self.lidar_handlers = {}
@@ -524,23 +519,12 @@ class GLViewer:
         self.change_state = False
         return copy_state
 
-    def set_frame_callback(self, callback, fps=60):
-        self.frame_callback = callback
-        if fps and fps > 0:
-            self.frame_interval_sec = 1.0 / float(fps)
-        else:
-            self.frame_interval_sec = 1.0 / 60.0
-
     def set_command_callback(self, callback):
         self.command_callback = callback
 
     def set_control_status(self, text):
         with self.mutex:
             self.control_status_text = str(text) if text is not None else ""
-
-    def set_stream_3d_only(self, enabled):
-        with self.mutex:
-            self.stream_3d_only = bool(enabled)
 
     def idle(self):
         if self.available:
@@ -675,124 +659,117 @@ class GLViewer:
             # Left 1/3 for Images, Right 2/3 for Mesh
             left_w = int(wnd_w * self.layout_left_ratio)
             right_w = wnd_w - left_w
-            if self.stream_3d_only:
-                left_w = 0
-                # Web-only optimization path: render 3D view full-frame.
-                glViewport(0, 0, wnd_w, wnd_h)
-                self.draw_3d_mesh()
-            else:
-                # 1. Draw Mesh (Right Side)
-                glViewport(left_w, 0, right_w, wnd_h)
-                self.draw_3d_mesh()
-                
-                # 2. Draw 2D Images (Left Side)
-                rgb_h = int(wnd_h * self.layout_rgb_ratio)
-                lidar_h = wnd_h - rgb_h
-
-                # Top-Left: RGB
-                rgb_vp = self._fit_viewport_keep_aspect(0, lidar_h, left_w, rgb_h, self.rgb_aspect_ratio)
-                glViewport(rgb_vp[0], rgb_vp[1], rgb_vp[2], rgb_vp[3])
-                self.image_handler.draw(self.image_handler.tex_rgb)
-                self.draw_mesh_overlay(include_lidar=False, apply_pan=False)
-
-                # Bottom-Left: LiDAR 2D View
-                glViewport(0, 0, left_w, lidar_h)
+            # 1. Draw Mesh (Right Side)
+            glViewport(left_w, 0, right_w, wnd_h)
+            self.draw_3d_mesh()
             
-            if not self.stream_3d_only:
-                # Setup Orthographic Projection (Top-Down View)
-                # Range: +/- 5 meters
-                glMatrixMode(GL_PROJECTION)
-                glPushMatrix()
-                glLoadIdentity()
-                # Left, Right, Bottom, Top
-                # X is Left/Right (-5, 5), Z is Forward/Backward (-10, 0) -> mapped to Y
-                # Actually just map X->X, Z->Y for display
-                # Range: Wide view
-                glOrtho(-3, 3, -6, 1, -1, 1) # X: -3m~3m, Z: -6m~1m (1m behind camera)
-                
-                glMatrixMode(GL_MODELVIEW)
-                glPushMatrix()
-                glLoadIdentity()
-                
-                # Draw Grid
-                glLineWidth(1.0)
-                glBegin(GL_LINES)
-                glColor3f(0.3, 0.3, 0.3)
-                # Vertical lines (Range markers)
-                for i in range(-5, 2):
-                    glVertex2f(-5.0, float(i))
-                    glVertex2f( 5.0, float(i))
-                # Horizontal lines (Direction)
-                for i in range(-5, 6):
-                    glVertex2f(float(i), -6.0)
-                    glVertex2f(float(i),  1.0)
-                
-                # Forward Vector (Z axis negative)
-                glColor3f(0.0, 1.0, 0.0)
-                glVertex2f(0.0, 0.0)
-                glVertex2f(0.0, -1.0)
-                glEnd()
-                
-                # Draw LiDAR Points (Project 3D points to 2D: X, Z)
-                # Since point_handler uses a shader with MVP, we need to manually draw or transform
-                # But here we are in fixed function pipeline mode for grid.
-                # Let's use simple glBegin(GL_POINTS) for the 2D view as we have access to raw points via buffer? No.
-                # We don't have raw points easily here unless we store them.
-                # Hack: Use point_handler with an orthographic MVP matrix.
-                
-                # Top-Down MVP:
-                # View: Camera at (0, 10, 0) looking at (0, 0, -3), Up (0, 0, -1)
-                # Proj: Ortho
-                pass 
-                
-                glPopMatrix()
-                glMatrixMode(GL_PROJECTION)
-                glPopMatrix()
-                glMatrixMode(GL_MODELVIEW)
-                
-                # Use PointHandler for 2D View (Top Down)
-                # Construct simple ortho matrix manually or use GLU?
-                # Creating a matrix manually for the shader:
-                # Ortho(-3, 3, -6, 1, -10, 10)
-                # X'= X / 3
-                # Y'= Z / 3.5 (mapped to -1~1 range)
-                
-                # Simplified: Let's rotate the view so Z becomes Y.
-                # Rotate X by 90 degrees.
-                # ModelView:
-                # 1 0 0 0
-                # 0 0 -1 0
-                # 0 1 0 0
-                # 0 0 0 1
-                
-                rot_x_90 = np.array([
-                    1, 0, 0, 0,
-                    0, 0, 1, 0, 
-                    0, -1, 0, 0,
-                    0, 0, 0, 1
-                ], dtype=np.float32)
-                
-                # Ortho Matrix (Column Major for OpenGL)
-                # l=-3, r=3, b=-6, t=1, n=-10, f=10
-                l, r, b, t, n, f = -3.0, 3.0, -6.0, 1.0, -10.0, 10.0
-                
-                ortho_mat = np.array([
-                    2/(r-l), 0, 0, 0,
-                    0, 2/(t-b), 0, 0,
-                    0, 0, -2/(f-n), 0,
-                    -(r+l)/(r-l), -(t+b)/(t-b), -(f+n)/(f-n), 1
-                ], dtype=np.float32)
-                
-                mvp_2d = np.dot(rot_x_90.reshape(4,4), ortho_mat.reshape(4,4)).flatten()
-                
-                glPointSize(3.0)
-                for name in self.lidar_order:
-                    self.lidar_handlers[name].draw(mvp_2d)
-                # Draw threshold-hit points in red on top of normal 2D points.
-                glPointSize(4.0)
-                for name in self.lidar_order:
-                    if name in self.lidar_alert_handlers:
-                        self.lidar_alert_handlers[name].draw(mvp_2d)
+            # 2. Draw 2D Images (Left Side)
+            rgb_h = int(wnd_h * self.layout_rgb_ratio)
+            lidar_h = wnd_h - rgb_h
+
+            # Top-Left: RGB
+            rgb_vp = self._fit_viewport_keep_aspect(0, lidar_h, left_w, rgb_h, self.rgb_aspect_ratio)
+            glViewport(rgb_vp[0], rgb_vp[1], rgb_vp[2], rgb_vp[3])
+            self.image_handler.draw(self.image_handler.tex_rgb)
+            self.draw_mesh_overlay(include_lidar=False, apply_pan=False)
+
+            # Bottom-Left: LiDAR 2D View
+            glViewport(0, 0, left_w, lidar_h)
+            
+            # Setup Orthographic Projection (Top-Down View)
+            # Range: +/- 5 meters
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            # Left, Right, Bottom, Top
+            # X is Left/Right (-5, 5), Z is Forward/Backward (-10, 0) -> mapped to Y
+            # Actually just map X->X, Z->Y for display
+            # Range: Wide view
+            glOrtho(-3, 3, -6, 1, -1, 1) # X: -3m~3m, Z: -6m~1m (1m behind camera)
+            
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+            
+            # Draw Grid
+            glLineWidth(1.0)
+            glBegin(GL_LINES)
+            glColor3f(0.3, 0.3, 0.3)
+            # Vertical lines (Range markers)
+            for i in range(-5, 2):
+                glVertex2f(-5.0, float(i))
+                glVertex2f( 5.0, float(i))
+            # Horizontal lines (Direction)
+            for i in range(-5, 6):
+                glVertex2f(float(i), -6.0)
+                glVertex2f(float(i),  1.0)
+            
+            # Forward Vector (Z axis negative)
+            glColor3f(0.0, 1.0, 0.0)
+            glVertex2f(0.0, 0.0)
+            glVertex2f(0.0, -1.0)
+            glEnd()
+            
+            # Draw LiDAR Points (Project 3D points to 2D: X, Z)
+            # Since point_handler uses a shader with MVP, we need to manually draw or transform
+            # But here we are in fixed function pipeline mode for grid.
+            # Let's use simple glBegin(GL_POINTS) for the 2D view as we have access to raw points via buffer? No.
+            # We don't have raw points easily here unless we store them.
+            # Hack: Use point_handler with an orthographic MVP matrix.
+            
+            # Top-Down MVP:
+            # View: Camera at (0, 10, 0) looking at (0, 0, -3), Up (0, 0, -1)
+            # Proj: Ortho
+            pass 
+            
+            glPopMatrix()
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+            
+            # Use PointHandler for 2D View (Top Down)
+            # Construct simple ortho matrix manually or use GLU?
+            # Creating a matrix manually for the shader:
+            # Ortho(-3, 3, -6, 1, -10, 10)
+            # X'= X / 3
+            # Y'= Z / 3.5 (mapped to -1~1 range)
+            
+            # Simplified: Let's rotate the view so Z becomes Y.
+            # Rotate X by 90 degrees.
+            # ModelView:
+            # 1 0 0 0
+            # 0 0 -1 0
+            # 0 1 0 0
+            # 0 0 0 1
+            
+            rot_x_90 = np.array([
+                1, 0, 0, 0,
+                0, 0, 1, 0, 
+                0, -1, 0, 0,
+                0, 0, 0, 1
+            ], dtype=np.float32)
+            
+            # Ortho Matrix (Column Major for OpenGL)
+            # l=-3, r=3, b=-6, t=1, n=-10, f=10
+            l, r, b, t, n, f = -3.0, 3.0, -6.0, 1.0, -10.0, 10.0
+            
+            ortho_mat = np.array([
+                2/(r-l), 0, 0, 0,
+                0, 2/(t-b), 0, 0,
+                0, 0, -2/(f-n), 0,
+                -(r+l)/(r-l), -(t+b)/(t-b), -(f+n)/(f-n), 1
+            ], dtype=np.float32)
+            
+            mvp_2d = np.dot(rot_x_90.reshape(4,4), ortho_mat.reshape(4,4)).flatten()
+            
+            glPointSize(3.0)
+            for name in self.lidar_order:
+                self.lidar_handlers[name].draw(mvp_2d)
+            # Draw threshold-hit points in red on top of normal 2D points.
+            glPointSize(4.0)
+            for name in self.lidar_order:
+                if name in self.lidar_alert_handlers:
+                    self.lidar_alert_handlers[name].draw(mvp_2d)
 
             # Restoring logic
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -801,23 +778,6 @@ class GLViewer:
             # (Keep function for potential future debugging use.)
             # self.print_text(left_w, wnd_h)
             self.draw_control_status(left_w, wnd_h)
-
-            # Optional frame callback for web streaming.
-            if self.frame_callback:
-                now = time.time()
-                if (now - self.last_frame_capture_time) >= self.frame_interval_sec:
-                    try:
-                        full_w = glutGet(GLUT_WINDOW_WIDTH)
-                        full_h = glutGet(GLUT_WINDOW_HEIGHT)
-                        glPixelStorei(GL_PACK_ALIGNMENT, 1)
-                        pixel_bytes = glReadPixels(0, 0, full_w, full_h, GL_RGB, GL_UNSIGNED_BYTE)
-                        if pixel_bytes is not None:
-                            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape(full_h, full_w, 3)
-                            frame = np.flipud(frame)
-                            self.frame_callback(frame)
-                            self.last_frame_capture_time = now
-                    except Exception:
-                        pass
 
             self.mutex.release()  
 

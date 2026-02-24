@@ -57,7 +57,6 @@
         <label for="lidarSel">LiDAR</label>
         <select id="lidarSel"></select>
         <button id="refreshBtn" type="button">Refresh</button>
-        <button id="resetPanBtn" type="button">Reset Pan</button>
       </div>
     </div>
 
@@ -226,10 +225,6 @@
     }
 
     $("refreshBtn").addEventListener("click", refreshState);
-    $("resetPanBtn").addEventListener("click", async () => {
-      await apiControl("reset_view", {});
-      await refreshState();
-    });
     $("applyStepBtn").addEventListener("click", async () => {
       await apiControl("offset_set_step", { step: Number(stepInput.value || 0.01) });
       await refreshState();

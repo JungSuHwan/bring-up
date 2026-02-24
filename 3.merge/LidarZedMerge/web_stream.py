@@ -1,10 +1,8 @@
-import threading
+from flask import Flask
+from flask import jsonify, request, send_from_directory
 import logging
 import os
-
-import cv2
-import numpy as np
-from flask import Flask, Response, jsonify, request, send_from_directory
+import threading
 from werkzeug.serving import make_server
 
 
@@ -16,322 +14,22 @@ class WebFrameServer:
         self._server = None
         self._thread = None
         self._running = False
-        self._jpeg_lock = threading.Lock()
-        self._frame_cond = threading.Condition(self._jpeg_lock)
-        self._latest_jpeg = None
-        self._frame_id = 0
         self._control_callback = None
         self._state_callback = None
-        self._jpeg_quality = 70
         self._setup_routes()
 
     def _setup_routes(self):
         @self._app.route("/")
         def index():
-            return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>LiDAR + ZED Web View</title>
-  <style>
-    :root {
-      --bg: #0f1218;
-      --panel: #171b24;
-      --text: #e7ecf6;
-      --muted: #9ea8bb;
-      --line: #2a3242;
-      --accent: #56b6ff;
-    }
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: radial-gradient(1200px 600px at 20% -10%, #1e2636 0%, var(--bg) 45%);
-      color: var(--text);
-      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
-    }
-    .layout {
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      height: 100%;
-    }
-    .topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(23, 27, 36, 0.8);
-      backdrop-filter: blur(4px);
-    }
-    .title {
-      font-weight: 700;
-      letter-spacing: 0.2px;
-    }
-    .meta {
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .stage {
-      padding: 10px;
-      min-height: 0;
-    }
-    .stream-box {
-      height: 100%;
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #0b0f15;
-      overflow: hidden;
-      position: relative;
-    }
-    .hover-info {
-      position: absolute;
-      left: 10px;
-      bottom: 10px;
-      padding: 6px 8px;
-      border-radius: 8px;
-      border: 1px solid var(--line);
-      background: rgba(15, 20, 30, 0.8);
-      color: #cfe3ff;
-      font-size: 12px;
-      font-family: Consolas, "Courier New", monospace;
-      pointer-events: none;
-      display: none;
-    }
-    .stream {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      user-select: none;
-      -webkit-user-drag: none;
-      touch-action: none;
-      display: block;
-    }
-    .stream.mode-map {
-      width: 172%;
-      transform: translateX(-42%);
-      transform-origin: top left;
-    }
-    .hintbar {
-      border-top: 1px solid var(--line);
-      background: rgba(23, 27, 36, 0.9);
-      color: var(--muted);
-      font-size: 13px;
-      padding: 9px 14px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .ok { color: #90e39a; }
-    .warn { color: #ffd580; }
-    .mono { font-family: Consolas, "Courier New", monospace; }
-  </style>
-</head>
-<body>
-  <div class="layout">
-    <div class="topbar">
-      <div class="title">LiDAR + ZED Web Display</div>
-      <div id="meta" class="meta mono">state: loading...</div>
-    </div>
-    <div class="stage">
-      <div class="stream-box">
-        <img id="stream" class="stream" src="/stream.mjpg" alt="stream" />
-        <div id="hoverInfo" class="hover-info"></div>
-      </div>
-    </div>
-    <div class="hintbar">
-      <span class="ok">Drag</span>: pan map,
-      <span class="ok">Wheel</span>: zoom,
-      <span class="warn">View</span>: <span class="mono">?view=full</span> or <span class="mono">?view=map</span>,
-      <span class="warn">Console</span>: extrinsic tuning keys
-    </div>
-  </div>
-<script>
-(() => {
-  const stream = document.getElementById("stream");
-  const hoverInfo = document.getElementById("hoverInfo");
-  const LEFT_RATIO = 0.42;
-  const RGB_RATIO = 0.64;
-  const meta = document.getElementById("meta");
-  const params = new URLSearchParams(window.location.search);
-  const viewMode = (params.get("view") || "full").toLowerCase();
-  if (viewMode === "map") {
-    stream.classList.add("mode-map");
-  }
-  let mouseDown = false;
-  let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
-  let pendingDx = 0;
-  let pendingDy = 0;
-  let panScheduled = false;
-
-  function sendControl(payload) {
-    fetch("/control", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      keepalive: true
-    }).catch(() => {});
-  }
-
-  function in3DPanel(offsetX, width) {
-    if (viewMode === "map") {
-      return true;
-    }
-    return offsetX >= (width * LEFT_RATIO);
-  }
-
-  function getContentRect() {
-    const cw = stream.clientWidth;
-    const ch = stream.clientHeight;
-    const nw = stream.naturalWidth || cw;
-    const nh = stream.naturalHeight || ch;
-    const scale = Math.min(cw / nw, ch / nh);
-    const rw = nw * scale;
-    const rh = nh * scale;
-    const ox = (cw - rw) * 0.5;
-    const oy = (ch - rh) * 0.5;
-    return { ox, oy, rw, rh };
-  }
-
-  function update2DHover(e) {
-    // Hover helper only for full-view layout (left-bottom 2D lidar panel).
-    if (viewMode !== "full") {
-      hoverInfo.style.display = "none";
-      return;
-    }
-    const rect = stream.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const c = getContentRect();
-    if (x < c.ox || x > c.ox + c.rw || y < c.oy || y > c.oy + c.rh) {
-      hoverInfo.style.display = "none";
-      return;
-    }
-    const sx = (x - c.ox) / c.rw; // 0..1 in source image
-    const sy = (y - c.oy) / c.rh; // 0..1 in source image
-
-    // 2D lidar panel occupies left ratio and bottom (1-rgb_ratio) of source frame.
-    if (!(sx >= 0 && sx <= LEFT_RATIO && sy >= RGB_RATIO && sy <= 1.0)) {
-      hoverInfo.style.display = "none";
-      return;
-    }
-
-    // Local coordinates in 2D panel.
-    const u = sx / LEFT_RATIO;                  // 0..1 left panel width
-    const v = (sy - RGB_RATIO) / (1.0 - RGB_RATIO); // 0..1 bottom panel height, top->bottom
-
-    // Same ortho used in viewer.py 2D panel: x:[-3,3], z:[-6,1]
-    const x_m = -3.0 + (u * 6.0);
-    const z_m = 1.0 - (v * 7.0);
-    const dist = Math.sqrt((x_m * x_m) + (z_m * z_m));
-    const ang = (Math.atan2(-x_m, -z_m) * 180.0) / Math.PI;
-
-    hoverInfo.textContent = `dist=${dist.toFixed(2)}m  angle=${ang.toFixed(1)}deg  x=${x_m.toFixed(2)} z=${z_m.toFixed(2)}`;
-    hoverInfo.style.display = "block";
-  }
-
-  function flushPan() {
-    panScheduled = false;
-    if (pendingDx === 0 && pendingDy === 0) return;
-    sendControl({ action: "pan_pixels", dx: pendingDx, dy: pendingDy });
-    pendingDx = 0;
-    pendingDy = 0;
-  }
-
-  stream.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
-    if (!in3DPanel(e.offsetX, stream.clientWidth)) return;
-    mouseDown = true;
-    dragging = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    e.preventDefault();
-  });
-
-  window.addEventListener("mouseup", () => {
-    mouseDown = false;
-    dragging = false;
-  });
-
-  window.addEventListener("mousemove", (e) => {
-    update2DHover(e);
-    if (!mouseDown) return;
-    if (!dragging) return;
-    const dx = e.clientX - lastX;
-    const dy = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    pendingDx += dx;
-    pendingDy += dy;
-    if (!panScheduled) {
-      panScheduled = true;
-      setTimeout(flushPan, 30);
-    }
-  });
-
-  stream.addEventListener("mouseleave", () => {
-    hoverInfo.style.display = "none";
-  });
-
-  stream.addEventListener("wheel", (e) => {
-    if (!in3DPanel(e.offsetX, stream.clientWidth)) return;
-    const steps = e.deltaY < 0 ? 1 : -1;
-    sendControl({ action: "zoom_steps", steps });
-    e.preventDefault();
-  }, { passive: false });
-
-  async function refreshState() {
-    try {
-      const res = await fetch("/lidar_state", { cache: "no-store" });
-      if (!res.ok) {
-        meta.textContent = "state: unavailable";
-        return;
-      }
-      const data = await res.json();
-      const lidars = Array.isArray(data.lidars) ? data.lidars : [];
-      if (lidars.length === 0) {
-        meta.textContent = "lidar: none";
-        return;
-      }
-      const selectedName = data.selected_name || lidars[0].name;
-      const target = lidars.find((x) => x.name === selectedName) || lidars[0];
-      const off = target.offset || { x: 0, y: 0, z: 0 };
-      const yaw = Number(target.yaw_deg || 0);
-      meta.textContent = `lidar=${target.name} status=${target.connected ? "UP" : "DOWN"} fps=${Number(target.fps || 0).toFixed(1)} off=(${Number(off.x).toFixed(3)},${Number(off.y).toFixed(3)},${Number(off.z).toFixed(3)}) yaw=${yaw.toFixed(2)}`;
-    } catch (_) {
-      meta.textContent = "state: error";
-    }
-  }
-
-  setInterval(refreshState, 1000);
-  refreshState();
-})();
-</script>
-</body>
-</html>
-"""
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            controller_dir = os.path.join(base_dir, "web_lidar_controller")
+            return send_from_directory(controller_dir, "index.html")
 
         @self._app.route("/controller")
         def controller():
             base_dir = os.path.dirname(os.path.abspath(__file__))
             controller_dir = os.path.join(base_dir, "web_lidar_controller")
             return send_from_directory(controller_dir, "index.html")
-
-        @self._app.route("/stream.mjpg")
-        def stream():
-            return Response(
-                self._mjpeg_generator(),
-                mimetype="multipart/x-mixed-replace; boundary=frame",
-                headers={
-                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                    "Pragma": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
 
         @self._app.route("/control", methods=["POST"])
         def control():
@@ -358,67 +56,15 @@ class WebFrameServer:
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e), "lidars": []}), 500
 
-    def _mjpeg_generator(self):
-        last_frame_id = -1
-        while self._running:
-            with self._frame_cond:
-                while self._running and self._frame_id == last_frame_id:
-                    self._frame_cond.wait(timeout=1.0)
-                if not self._running:
-                    break
-                jpeg = self._latest_jpeg
-                last_frame_id = self._frame_id
-            if jpeg is None:
-                continue
-
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-            )
-
-    def update_frame(self, frame):
-        if frame is None:
-            return
-        try:
-            if not isinstance(frame, np.ndarray) or frame.ndim != 3:
-                return
-
-            channels = frame.shape[2]
-            if channels == 3:
-                # Accept RGB by default. If source is BGR, output color may look swapped.
-                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            elif channels == 4:
-                # ZED Mat often comes as BGRA/RGBA depending on source path.
-                # Try BGRA first for practical compatibility.
-                bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            else:
-                return
-
-            ok, encoded = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(self._jpeg_quality)])
-            if not ok:
-                return
-            with self._frame_cond:
-                self._latest_jpeg = encoded.tobytes()
-                self._frame_id += 1
-                self._frame_cond.notify_all()
-        except Exception:
-            # Keep rendering loop stable even if encoding fails temporarily.
-            pass
-
     def set_control_callback(self, callback):
         self._control_callback = callback
 
     def set_state_callback(self, callback):
         self._state_callback = callback
 
-    def set_jpeg_quality(self, quality):
-        q = int(quality)
-        self._jpeg_quality = max(30, min(95, q))
-
     def start(self):
         if self._running:
             return
-        # Suppress Werkzeug access logs (e.g. repeated /lidar_state polling).
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
         self._server = make_server(self.host, self.port, self._app, threaded=True)
         self._running = True
@@ -427,8 +73,6 @@ class WebFrameServer:
 
     def stop(self):
         self._running = False
-        with self._frame_cond:
-            self._frame_cond.notify_all()
         if self._server is not None:
             self._server.shutdown()
         if self._thread is not None and self._thread.is_alive():

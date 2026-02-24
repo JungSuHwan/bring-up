@@ -36,10 +36,7 @@
   "web": {
     "enabled": true,
     "host": "0.0.0.0",
-    "port": 8080,
-    "fps": 90,
-    "optimize_for_web_only": false,
-    "jpeg_quality": 65
+    "port": 8080
   },
   "lidar_2d_alert_threshold": {
     "enabled": true,
