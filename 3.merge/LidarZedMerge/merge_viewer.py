@@ -2,6 +2,8 @@ import sys
 import time
 import json
 import os
+import math
+import numpy as np
 import pyzed.sl as sl
 import ogl_viewer.viewer as gl
 import lidar_thread
@@ -15,6 +17,42 @@ else:
     import tty
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
+
+
+def _to_np_4x4(mat_like):
+    arr = np.array(mat_like, dtype=np.float32)
+    if arr.shape == (4, 4):
+        return arr
+    flat = arr.reshape(-1)
+    if flat.size != 16:
+        raise ValueError(f"Expected 16 elements for 4x4 matrix, got {flat.size}")
+    return flat.reshape(4, 4)
+
+
+def build_extrinsic_4x4(offset, yaw_deg):
+    yaw_rad = math.radians(float(yaw_deg))
+    c = math.cos(yaw_rad)
+    s = math.sin(yaw_rad)
+    t = np.eye(4, dtype=np.float32)
+    # Y-up rotation (X-Z plane)
+    t[0, 0] = c
+    t[0, 2] = -s
+    t[2, 0] = s
+    t[2, 2] = c
+    t[0, 3] = float(offset.get("x", 0.0))
+    t[1, 3] = float(offset.get("y", 0.0))
+    t[2, 3] = float(offset.get("z", 0.0))
+    return t
+
+
+def transform_points_flat(points, t_4x4):
+    if not points:
+        return []
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    ones = np.ones((pts.shape[0], 1), dtype=np.float32)
+    pts_h = np.concatenate([pts, ones], axis=1)
+    pts_w = (t_4x4 @ pts_h.T).T[:, :3]
+    return pts_w.reshape(-1).tolist()
 
 
 def setup_console_input():
@@ -984,14 +1022,25 @@ def main():
                     
                 # (C) LiDAR Data Update (multi-lidar)
                 lidar_frames = []
+                try:
+                    t_world_robot = _to_np_4x4(pose.pose_data().m)
+                except Exception:
+                    t_world_robot = np.eye(4, dtype=np.float32)
                 for lidar in lidars:
-                    pts = lidar.get_latest_points()
-                    alert_pts = lidar.get_latest_alert_points()
+                    pts_local = lidar.get_latest_points()
+                    alert_pts_local = lidar.get_latest_alert_points()
                     status = lidar.get_status()
+                    t_robot_lidar = build_extrinsic_4x4(
+                        status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
+                        status.get("yaw_deg", 0.0),
+                    )
+                    t_world_lidar = np.dot(t_world_robot, t_robot_lidar)
+                    pts_world = transform_points_flat(pts_local, t_world_lidar)
+                    alert_pts_world = transform_points_flat(alert_pts_local, t_world_lidar)
                     lidar_frames.append({
                         "name": lidar.name,
-                        "points": pts if pts else [],
-                        "alert_points": alert_pts if alert_pts else [],
+                        "points": pts_world,
+                        "alert_points": alert_pts_world,
                         "connected": status.get("connected", False),
                         "fps": status.get("fps", 0.0),
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),

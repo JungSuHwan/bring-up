@@ -220,15 +220,9 @@ class LidarReceiver(threading.Thread):
             points = []
             alert_points = []
             with self.lock:
-                off_x = float(self.offset_x)
-                off_y = float(self.offset_y)
-                off_z = float(self.offset_z)
-                yaw_rad = math.radians(float(self.yaw_deg))
                 alert_enabled = bool(self.alert_enabled)
                 alert_min = float(self.alert_min_m)
                 alert_max = float(self.alert_max_m)
-            c = math.cos(yaw_rad)
-            s = math.sin(yaw_rad)
             angle_curr = angle_begin
             for r in ranges:
                 if r > 0.05:
@@ -281,23 +275,11 @@ class LidarReceiver(threading.Thread):
                     # x_gl = -r * sin(rad)   (Forward 0->0, Left 90->-r)
                     # z_gl = -r * cos(rad)   (Forward 0->-r, Left 90->0)
                     
-                    # Let's stick to this simple rotation for now.
-                    # Mapping to Camera (Y-Up, Z-Forward)
-                    # Lidar Angle 0 -> Usually Forward (-Z in Camera)
-                    # Adjust rotation if Lidar is mounted differently
-                    
-                    # Standard mounting (Cable back):
-                    # x = -r * sin(rad)
-                    # z = -r * cos(rad)
-                    
-                    x_base = -r * math.sin(rad)
-                    z_base = -r * math.cos(rad)
-                    x_rot = (c * x_base) - (s * z_base)
-                    z_rot = (s * x_base) + (c * z_base)
-
-                    x_gl = x_rot + off_x
-                    y_gl = off_y
-                    z_gl = z_rot + off_z
+                    # Step-1 only: polar -> local Cartesian (LiDAR local frame).
+                    # Extrinsic(offset/yaw) and world transform are applied in merge_viewer.py.
+                    x_gl = -r * math.sin(rad)
+                    y_gl = 0.0
+                    z_gl = -r * math.cos(rad)
                     
                     points.append(x_gl) # x
                     points.append(y_gl) # y
