@@ -1,7 +1,6 @@
 import sys
 import time
 import signal
-import argparse
 import json
 import os
 import numpy as np
@@ -13,19 +12,7 @@ import web_stream
 if os.name == "nt":
     import msvcrt
 
-def parse_args():
-    default_lidar_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
-    parser = argparse.ArgumentParser(description="ZED + LiDAR merge viewer")
-    parser.add_argument(
-        "--lidar-config",
-        default=default_lidar_config,
-        help="LiDAR config path (default: LidarZedMerge/lidar_config.json)",
-    )
-    parser.add_argument("--web", action="store_true", help="Enable web streaming")
-    parser.add_argument("--web-host", default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
-    parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default: 8080)")
-    parser.add_argument("--web-fps", type=int, default=60, help="Web stream capture FPS (default: 60)")
-    return parser.parse_args()
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
 
 
 def load_config_json(config_path):
@@ -235,34 +222,33 @@ def print_zed_settings_snapshot(tag, init_params, tracking_params, mapping_param
 
 
 def main():
-    args = parse_args()
     server = None
     viewer = None
     zed = None
     image = None
     pymesh = None
     lidars = []
-    config = load_config_json(args.lidar_config)
+    config_path = os.path.abspath(CONFIG_PATH)
+    config = load_config_json(config_path)
     display_options = load_display_options(config)
     web_options = load_web_options(config)
     zed_options = load_zed_options(config)
     pc_window_enabled = display_options["pc_window_enabled"]
-    # CLI flag still works. If not given, config can enable web streaming.
-    web_enabled = bool(args.web or web_options["enabled"])
-    web_host = args.web_host if args.web else web_options["host"]
-    web_port = args.web_port if args.web else web_options["port"]
-    web_fps = args.web_fps if args.web else web_options["fps"]
+    web_enabled = bool(web_options["enabled"])
+    web_host = web_options["host"]
+    web_port = web_options["port"]
+    web_fps = web_options["fps"]
     web_optimize_for_web_only = bool(web_options["optimize_for_web_only"])
     web_jpeg_quality = int(web_options["jpeg_quality"])
-    config_path = os.path.abspath(args.lidar_config)
-    profiles_path = os.path.abspath("lidar_profiles.json")
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
         "yaw_step_deg": 0.5,  # degree
     }
     alert_ui_state = load_lidar_alert_options(config)
-    profiles = {}
+    profiles = config.get("profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
     pending_config_save = False
     last_config_save_time = 0.0
     config_save_interval_sec = 0.5
@@ -385,16 +371,7 @@ def main():
             mapping_params.range_meter = float(range_cfg)
         
         # 3. Start LiDAR Threads
-        lidars = load_lidar_receivers(args.lidar_config, config=config)
-        try:
-            if os.path.exists(profiles_path):
-                with open(profiles_path, "r", encoding="utf-8") as f:
-                    profiles = json.load(f)
-                    if not isinstance(profiles, dict):
-                        profiles = {}
-        except Exception as e:
-            print(f"[Profile] Failed to load {profiles_path}: {e}")
-            profiles = {}
+        lidars = load_lidar_receivers(config_path, config=config)
         print(f"Starting LiDAR Receivers... count={len(lidars)}")
         for lidar in lidars:
             lidar.start()
@@ -472,12 +449,29 @@ def main():
                 viewer.set_control_status(text)
 
         def persist_profiles():
+            nonlocal config
             try:
-                with open(profiles_path, "w", encoding="utf-8") as f:
-                    json.dump(profiles, f, indent=2)
+                disk_cfg = {}
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            disk_cfg = json.load(f)
+                            if not isinstance(disk_cfg, dict):
+                                disk_cfg = {}
+                    except Exception:
+                        disk_cfg = {}
+                if not disk_cfg:
+                    disk_cfg = config if isinstance(config, dict) else {}
+                if not isinstance(disk_cfg, dict):
+                    disk_cfg = {}
+
+                disk_cfg["profiles"] = profiles
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(disk_cfg, f, indent=2)
+                config = disk_cfg
                 return True
             except Exception as e:
-                print(f"[Profile] Failed to save {profiles_path}: {e}")
+                print(f"[Profile] Failed to save profiles to {config_path}: {e}")
                 return False
 
         def request_config_save():

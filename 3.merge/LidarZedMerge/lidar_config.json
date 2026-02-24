@@ -28,7 +28,7 @@
     }
   },
   "display": {
-    "pc_window_enabled": false
+    "pc_window_enabled": true
   },
   "web": {
     "enabled": true,
@@ -46,7 +46,7 @@
   "lidars": [
     {
       "name": "lidar_31",
-      "enabled": true,
+      "enabled": false,
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
