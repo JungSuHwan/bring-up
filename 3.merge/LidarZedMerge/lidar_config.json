@@ -13,7 +13,7 @@
       "mode": "GEN_1",
       "initial_position_m": {
         "x": 0.0,
-        "y": 0.0,
+        "y": 0.63,
         "z": 0.0
       }
     },
@@ -41,7 +41,7 @@
   "lidar_2d_alert_threshold": {
     "enabled": true,
     "min_m": 0.0,
-    "max_m": 0.5
+    "max_m": 0.8
   },
   "lidars": [
     {
@@ -50,17 +50,17 @@
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
-        "x": 0.004999999999999998,
-        "y": -0.020000000000000004,
-        "z": -0.09500000000000001
+        "x": -0.14,
+        "y": 0.0,
+        "z": 0.0
       },
       "rotation": {
-        "yaw_deg": 3.0
+        "yaw_deg": 0.0
       }
     },
     {
       "name": "lidar_41",
-      "enabled": true,
+      "enabled": false,
       "ip": "192.168.0.41",
       "port": 8000,
       "offset": {

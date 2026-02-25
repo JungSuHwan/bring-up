@@ -888,7 +888,6 @@ class GLViewer:
             rgb_vp = self._fit_viewport_keep_aspect(0, lidar_h, left_w, rgb_h, self.rgb_aspect_ratio)
             glViewport(rgb_vp[0], rgb_vp[1], rgb_vp[2], rgb_vp[3])
             self.image_handler.draw(self.image_handler.tex_rgb)
-            self.draw_mesh_overlay(include_lidar=False, apply_pan=False)
 
             # Bottom-Left: LiDAR 2D View
             glViewport(0, 0, left_w, lidar_h)
@@ -1092,13 +1091,6 @@ class GLViewer:
         glUseProgram(0)
 
         if include_lidar:
-            if self.robot_overlay_enabled:
-                if self.robot_body_fill is not None:
-                    self.robot_body_fill.draw(vpMat)
-                if self.robot_heading_fill is not None:
-                    self.robot_heading_fill.draw(vpMat)
-                if self.robot_body_outline is not None:
-                    self.robot_body_outline.draw(vpMat)
             glPointSize(5.0)
             for name in self.lidar_order:
                 self.lidar_handlers[name].draw(vpMat)

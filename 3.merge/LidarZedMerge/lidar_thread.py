@@ -325,6 +325,7 @@ class LidarReceiver(threading.Thread):
                 "point_count": len(self.latest_points_3d) // 3,
                 "alert_point_count": len(self.latest_alert_points_3d) // 3,
                 "fps": float(self.frame_rate_hz),
+                "frame_time_s": float(self.last_frame_time) if self.last_frame_time is not None else None,
                 "offset": {
                     "x": float(self.offset_x),
                     "y": float(self.offset_y),

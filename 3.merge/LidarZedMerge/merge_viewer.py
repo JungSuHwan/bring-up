@@ -3,6 +3,7 @@ import time
 import json
 import os
 import math
+from collections import deque
 import numpy as np
 import pyzed.sl as sl
 import ogl_viewer.viewer as gl
@@ -403,6 +404,14 @@ def main():
         "speed_mps": 0.0,
         "speed_kph": 0.0,
     }
+    prev_grab_wall_time = None
+    last_map_retrieve_time = None
+    pose_history = deque(maxlen=180)
+    runtime_perf = {
+        "zed_fps": 0.0,
+        "map_hz": 0.0,
+        "lidar_pose_lag_ms": 0.0,
+    }
 
     try:
         console_input_state = setup_console_input()
@@ -590,24 +599,28 @@ def main():
 
         def update_control_status():
             selected = get_selected_lidar()
-            if selected is None:
-                if viewer is not None:
-                    viewer.set_control_status("LiDAR: none")
-                return
-            status = selected.get_status()
-            off = status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
-            yaw = float(status.get("yaw_deg", 0.0))
             speed_mps = float(robot_velocity_state.get("speed_mps", 0.0))
             speed_kph = float(robot_velocity_state.get("speed_kph", 0.0))
-            text = (
-                f"lidar={selected.name} "
-                f"step={offset_ui_state['step']:.3f}m yaw_step={offset_ui_state['yaw_step_deg']:.2f}deg "
-                f"off=({float(off.get('x', 0.0)):+.3f},{float(off.get('y', 0.0)):+.3f},{float(off.get('z', 0.0)):+.3f}) "
-                f"yaw={yaw:+.2f} "
-                f"v={speed_mps:.2f}m/s({speed_kph:.2f}km/h)"
-            )
+            text = f"v={speed_mps:.2f}m/s({speed_kph:.2f}km/h)"
             if viewer is not None:
                 viewer.set_control_status(text)
+
+        def get_pose_nearest_to_time(frame_time_s, default_t_world_robot):
+            if frame_time_s is None or not pose_history:
+                return default_t_world_robot, None
+            best_t = None
+            best_mat = None
+            best_abs = None
+            for t_s, mat in pose_history:
+                dt = abs(float(t_s) - float(frame_time_s))
+                if best_abs is None or dt < best_abs:
+                    best_abs = dt
+                    best_t = float(t_s)
+                    best_mat = mat
+            if best_mat is None:
+                return default_t_world_robot, None
+            lag_ms = (float(best_t) - float(frame_time_s)) * 1000.0
+            return best_mat, lag_ms
 
         def update_robot_velocity_from_pose(cur_pose):
             nonlocal prev_pose_time_s, prev_translation
@@ -1084,6 +1097,16 @@ def main():
                     force_save_map = True
 
             if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
+                now_wall = time.time()
+                if prev_grab_wall_time is not None:
+                    dt = now_wall - float(prev_grab_wall_time)
+                    if dt > 1e-6:
+                        inst_fps = 1.0 / dt
+                        if float(runtime_perf["zed_fps"]) <= 0.0:
+                            runtime_perf["zed_fps"] = inst_fps
+                        else:
+                            runtime_perf["zed_fps"] = (0.85 * float(runtime_perf["zed_fps"])) + (0.15 * inst_fps)
+                prev_grab_wall_time = now_wall
                 if save_map_requested or force_save_map:
                     save_map_requested = False
                     force_save_map = False
@@ -1124,6 +1147,11 @@ def main():
                 # (A) ZED Data
                 zed.retrieve_image(image, sl.VIEW.LEFT)
                 tracking_state = zed.get_position(pose, sl.REFERENCE_FRAME.WORLD)
+                try:
+                    t_world_robot_live = _to_np_4x4(pose.pose_data().m)
+                except Exception:
+                    t_world_robot_live = np.eye(4, dtype=np.float32)
+                pose_history.append((now_wall, np.array(t_world_robot_live, copy=True)))
                 update_robot_velocity_from_pose(pose)
                 update_control_status()
                 try:
@@ -1153,17 +1181,32 @@ def main():
                     if zed.get_spatial_map_request_status_async() == sl.ERROR_CODE.SUCCESS:
                         zed.retrieve_spatial_map_async(pymesh)
                         viewer.update_chunks()
+                        if last_map_retrieve_time is not None:
+                            dt = now_wall - float(last_map_retrieve_time)
+                            if dt > 1e-6:
+                                inst_hz = 1.0 / dt
+                                if float(runtime_perf["map_hz"]) <= 0.0:
+                                    runtime_perf["map_hz"] = inst_hz
+                                else:
+                                    runtime_perf["map_hz"] = (0.85 * float(runtime_perf["map_hz"])) + (0.15 * inst_hz)
+                        last_map_retrieve_time = now_wall
                     
                 # (C) LiDAR Data Update (multi-lidar)
                 lidar_frames = []
-                try:
-                    t_world_robot = _to_np_4x4(pose.pose_data().m)
-                except Exception:
-                    t_world_robot = np.eye(4, dtype=np.float32)
+                lag_samples_ms = []
                 for lidar in lidars:
                     pts_local = lidar.get_latest_points()
                     alert_pts_local = lidar.get_latest_alert_points()
                     status = lidar.get_status()
+                    frame_time_s = status.get("frame_time_s", None)
+                    if frame_time_s is not None:
+                        try:
+                            frame_time_s = float(frame_time_s)
+                        except Exception:
+                            frame_time_s = None
+                    t_world_robot, lag_ms = get_pose_nearest_to_time(frame_time_s, t_world_robot_live)
+                    if lag_ms is not None:
+                        lag_samples_ms.append(abs(float(lag_ms)))
                     t_robot_lidar = build_extrinsic_4x4(
                         status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         status.get("yaw_deg", 0.0),
@@ -1180,6 +1223,12 @@ def main():
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         "yaw_deg": status.get("yaw_deg", 0.0),
                     })
+                if lag_samples_ms:
+                    lag_avg = float(sum(lag_samples_ms) / max(1, len(lag_samples_ms)))
+                    if float(runtime_perf["lidar_pose_lag_ms"]) <= 0.0:
+                        runtime_perf["lidar_pose_lag_ms"] = lag_avg
+                    else:
+                        runtime_perf["lidar_pose_lag_ms"] = (0.8 * float(runtime_perf["lidar_pose_lag_ms"])) + (0.2 * lag_avg)
 
                 viewer.update_lidar_multi(lidar_frames)
                     
