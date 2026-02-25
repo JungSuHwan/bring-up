@@ -171,15 +171,18 @@
         if (!isFieldEditing(alertMaxInput) && typeof at.max_m === "number") alertMaxInput.value = Number(at.max_m).toFixed(2);
 
         const selected = lidars.find((l) => l.name === lidarSel.value) || lidars[0];
+        const rv = data.robot_velocity || {};
+        const speedMps = Number(rv.speed_mps || 0);
+        const speedKph = Number(rv.speed_kph || 0);
         if (selected) {
           const off = selected.offset || { x: 0, y: 0, z: 0 };
           if (!isFieldEditing(xInput)) xInput.value = Number(off.x || 0).toFixed(3);
           if (!isFieldEditing(yInput)) yInput.value = Number(off.y || 0).toFixed(3);
           if (!isFieldEditing(zInput)) zInput.value = Number(off.z || 0).toFixed(3);
           if (!isFieldEditing(yawInput)) yawInput.value = Number(selected.yaw_deg || 0).toFixed(2);
-          statusEl.textContent = `connected | lidar=${selected.name} | up=${!!selected.connected} | fps=${Number(selected.fps || 0).toFixed(1)}`;
+          statusEl.textContent = `connected | lidar=${selected.name} | up=${!!selected.connected} | fps=${Number(selected.fps || 0).toFixed(1)} | v=${speedMps.toFixed(2)}m/s (${speedKph.toFixed(2)}km/h)`;
         } else {
-          statusEl.textContent = "connected | no lidar";
+          statusEl.textContent = `connected | no lidar | v=${speedMps.toFixed(2)}m/s (${speedKph.toFixed(2)}km/h)`;
         }
       } catch (e) {
         statusEl.textContent = `disconnected | ${e}`;

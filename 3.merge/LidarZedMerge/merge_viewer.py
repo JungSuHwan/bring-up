@@ -329,6 +329,17 @@ def main():
     config_save_interval_sec = 0.5
     console_input_state = None
     save_map_requested = False
+    prev_pose_time_s = None
+    prev_translation = None
+    velocity_alpha = 0.2
+    robot_velocity_state = {
+        "valid": False,
+        "vx_mps": 0.0,
+        "vy_mps": 0.0,
+        "vz_mps": 0.0,
+        "speed_mps": 0.0,
+        "speed_kph": 0.0,
+    }
 
     try:
         console_input_state = setup_console_input()
@@ -509,6 +520,7 @@ def main():
                     "min_m": float(alert_ui_state["min_m"]),
                     "max_m": float(alert_ui_state["max_m"]),
                 },
+                "robot_velocity": dict(robot_velocity_state),
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "lidars": items,
             }
@@ -522,14 +534,59 @@ def main():
             status = selected.get_status()
             off = status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
             yaw = float(status.get("yaw_deg", 0.0))
+            speed_mps = float(robot_velocity_state.get("speed_mps", 0.0))
+            speed_kph = float(robot_velocity_state.get("speed_kph", 0.0))
             text = (
                 f"lidar={selected.name} "
                 f"step={offset_ui_state['step']:.3f}m yaw_step={offset_ui_state['yaw_step_deg']:.2f}deg "
                 f"off=({float(off.get('x', 0.0)):+.3f},{float(off.get('y', 0.0)):+.3f},{float(off.get('z', 0.0)):+.3f}) "
-                f"yaw={yaw:+.2f}"
+                f"yaw={yaw:+.2f} "
+                f"v={speed_mps:.2f}m/s({speed_kph:.2f}km/h)"
             )
             if viewer is not None:
                 viewer.set_control_status(text)
+
+        def update_robot_velocity_from_pose(cur_pose):
+            nonlocal prev_pose_time_s, prev_translation
+            try:
+                t_s = float(cur_pose.timestamp.get_milliseconds()) * 0.001
+                tr = cur_pose.get_translation(sl.Translation()).get()
+                cur_translation = np.array([
+                    float(tr[0]),
+                    float(tr[1]),
+                    float(tr[2]),
+                ], dtype=np.float64)
+            except Exception:
+                return
+
+            if prev_pose_time_s is not None and prev_translation is not None:
+                dt = t_s - prev_pose_time_s
+                if dt > 1e-6:
+                    v = (cur_translation - prev_translation) / dt
+                    vx = float(v[0])
+                    vy = float(v[1])
+                    vz = float(v[2])
+                    speed = float(math.sqrt((vx * vx) + (vy * vy) + (vz * vz)))
+
+                    if not robot_velocity_state["valid"]:
+                        robot_velocity_state["vx_mps"] = vx
+                        robot_velocity_state["vy_mps"] = vy
+                        robot_velocity_state["vz_mps"] = vz
+                    else:
+                        a = float(velocity_alpha)
+                        robot_velocity_state["vx_mps"] = ((1.0 - a) * robot_velocity_state["vx_mps"]) + (a * vx)
+                        robot_velocity_state["vy_mps"] = ((1.0 - a) * robot_velocity_state["vy_mps"]) + (a * vy)
+                        robot_velocity_state["vz_mps"] = ((1.0 - a) * robot_velocity_state["vz_mps"]) + (a * vz)
+                    sx = float(robot_velocity_state["vx_mps"])
+                    sy = float(robot_velocity_state["vy_mps"])
+                    sz = float(robot_velocity_state["vz_mps"])
+                    sm = float(math.sqrt((sx * sx) + (sy * sy) + (sz * sz)))
+                    robot_velocity_state["speed_mps"] = sm
+                    robot_velocity_state["speed_kph"] = sm * 3.6
+                    robot_velocity_state["valid"] = True
+
+            prev_pose_time_s = t_s
+            prev_translation = cur_translation
 
         def persist_profiles():
             nonlocal config
@@ -1003,7 +1060,9 @@ def main():
                 
                 # (A) ZED Data
                 zed.retrieve_image(image, sl.VIEW.LEFT)
-                tracking_state = zed.get_position(pose)
+                tracking_state = zed.get_position(pose, sl.REFERENCE_FRAME.WORLD)
+                update_robot_velocity_from_pose(pose)
+                update_control_status()
                 if mapping_activated:
                     mapping_state = zed.get_spatial_mapping_state()
                 else:
