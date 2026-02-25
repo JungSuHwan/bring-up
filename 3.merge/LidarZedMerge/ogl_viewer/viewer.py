@@ -269,6 +269,86 @@ class PointHandler:
         glDisableVertexAttribArray(0)
         glUseProgram(0)
 
+
+class LineLoopHandler:
+    def __init__(self):
+        self.vbo = None
+        self.count = 0
+        self.shader = None
+        self.color = [1.0, 0.0, 0.0]
+        self.width = 2.0
+
+    def initialize(self):
+        self.shader = Shader(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
+        self.u_mvp = glGetUniformLocation(self.shader.get_program_id(), "u_mvpMatrix")
+        self.u_color = glGetUniformLocation(self.shader.get_program_id(), "u_color")
+        self.vbo = glGenBuffers(1)
+
+    def update(self, points):
+        if not points:
+            self.count = 0
+            return
+        data = np.array(points, dtype=np.float32)
+        self.count = len(points) // 3
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def draw(self, mvp, color_override=None, width_override=None):
+        if self.count < 3:
+            return
+        glUseProgram(self.shader.get_program_id())
+        glUniformMatrix4fv(self.u_mvp, 1, GL_TRUE, (GLfloat * len(mvp))(*mvp))
+        color = color_override if color_override is not None else self.color
+        glUniform3fv(self.u_color, 1, color)
+        line_w = float(width_override) if width_override is not None else float(self.width)
+        glLineWidth(line_w)
+        glEnableVertexAttribArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glDrawArrays(GL_LINE_LOOP, 0, self.count)
+        glDisableVertexAttribArray(0)
+        glUseProgram(0)
+
+
+class FillPolygonHandler:
+    def __init__(self):
+        self.vbo = None
+        self.count = 0
+        self.shader = None
+        self.color = [1.0, 0.0, 0.0]
+
+    def initialize(self):
+        self.shader = Shader(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
+        self.u_mvp = glGetUniformLocation(self.shader.get_program_id(), "u_mvpMatrix")
+        self.u_color = glGetUniformLocation(self.shader.get_program_id(), "u_color")
+        self.vbo = glGenBuffers(1)
+
+    def update(self, points):
+        if not points:
+            self.count = 0
+            return
+        data = np.array(points, dtype=np.float32)
+        self.count = len(points) // 3
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def draw(self, mvp, color_override=None):
+        if self.count < 3:
+            return
+        glUseProgram(self.shader.get_program_id())
+        glUniformMatrix4fv(self.u_mvp, 1, GL_TRUE, (GLfloat * len(mvp))(*mvp))
+        color = color_override if color_override is not None else self.color
+        glUniform3fv(self.u_color, 1, color)
+        glEnableVertexAttribArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glDrawArrays(GL_TRIANGLE_FAN, 0, self.count)
+        glDisableVertexAttribArray(0)
+        glUseProgram(0)
+
+
 class GLViewer:
     """
     Class that manages the rendering in OpenGL
@@ -297,6 +377,10 @@ class GLViewer:
         self.lidar_alert_handlers = {}
         self.lidar_order = []
         self.lidar_status = {}
+        self.robot_overlay_enabled = False
+        self.robot_body_fill = None
+        self.robot_body_outline = None
+        self.robot_heading_fill = None
         self.lidar_palette = [
             [0.20, 0.85, 0.20],  # green
             [0.20, 0.60, 1.00],  # blue
@@ -312,6 +396,15 @@ class GLViewer:
         self.last_mouse_x = 0
         self.last_mouse_y = 0
         self.rgb_aspect_ratio = 16.0 / 9.0
+        self.lidar_2d_viewport = (0, 0, 1, 1)
+        self.lidar_2d_ortho = (-3.0, 3.0, -6.0, 1.0)  # left, right, bottom(z), top(z)
+        self.lidar_2d_hover_valid = False
+        self.lidar_2d_hover_x = 0.0
+        self.lidar_2d_hover_z = 0.0
+        self.lidar_2d_hover_dist = 0.0
+        self.lidar_2d_hover_angle_deg = 0.0
+        self.lidar_2d_hover_nx = 0.0
+        self.lidar_2d_hover_ny = 0.0
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
@@ -356,6 +449,17 @@ class GLViewer:
         # Create the rendering camera
         self.set_render_camera_projection(_params)
 
+        self.robot_body_fill = FillPolygonHandler()
+        self.robot_body_fill.initialize()
+        self.robot_body_fill.color = [0.90, 0.90, 0.95]
+        self.robot_body_outline = LineLoopHandler()
+        self.robot_body_outline.initialize()
+        self.robot_body_outline.color = [0.10, 0.20, 0.95]
+        self.robot_body_outline.width = 2.5
+        self.robot_heading_fill = FillPolygonHandler()
+        self.robot_heading_fill.initialize()
+        self.robot_heading_fill.color = [0.95, 0.90, 0.20]
+
         glLineWidth(1.)
         glPointSize(4.)
 
@@ -367,6 +471,7 @@ class GLViewer:
         glutKeyboardUpFunc(self.keyReleasedCallback)
         glutMouseFunc(self.mouse_button_callback)
         glutMotionFunc(self.mouse_motion_callback)
+        glutPassiveMotionFunc(self.mouse_passive_motion_callback)
         if hasattr(sys.modules[__name__], "glutMouseWheelFunc"):
             try:
                 glutMouseWheelFunc(self.mouse_wheel_callback)
@@ -526,6 +631,24 @@ class GLViewer:
         with self.mutex:
             self.control_status_text = str(text) if text is not None else ""
 
+    def set_robot_overlay(self, body_points_world, heading_points_world, enabled=True):
+        with self.mutex:
+            self.robot_overlay_enabled = bool(enabled)
+            if not self.robot_overlay_enabled:
+                if self.robot_body_fill is not None:
+                    self.robot_body_fill.update([])
+                if self.robot_body_outline is not None:
+                    self.robot_body_outline.update([])
+                if self.robot_heading_fill is not None:
+                    self.robot_heading_fill.update([])
+                return
+            if self.robot_body_fill is not None:
+                self.robot_body_fill.update(body_points_world if body_points_world else [])
+            if self.robot_body_outline is not None:
+                self.robot_body_outline.update(body_points_world if body_points_world else [])
+            if self.robot_heading_fill is not None:
+                self.robot_heading_fill.update(heading_points_world if heading_points_world else [])
+
     def idle(self):
         if self.available:
             glutPostRedisplay()
@@ -634,6 +757,7 @@ class GLViewer:
             self.zoom_by_steps(-1.0)
 
     def mouse_motion_callback(self, x, y):
+        self._update_lidar_2d_hover_from_mouse(x, y)
         if not self.drag_active:
             return
 
@@ -643,6 +767,99 @@ class GLViewer:
         self.last_mouse_y = y
 
         self.pan_by_pixels(dx, dy)
+
+    def mouse_passive_motion_callback(self, x, y):
+        self._update_lidar_2d_hover_from_mouse(x, y)
+
+    def _update_lidar_2d_hover_from_mouse(self, mouse_x, mouse_y):
+        wnd_h = int(glutGet(GLUT_WINDOW_HEIGHT))
+        if wnd_h <= 0:
+            return
+        with self.mutex:
+            vx, vy, vw, vh = self.lidar_2d_viewport
+            if vw <= 0 or vh <= 0:
+                self.lidar_2d_hover_valid = False
+                return
+            y_gl = wnd_h - int(mouse_y) - 1
+            inside = (int(mouse_x) >= vx) and (int(mouse_x) < (vx + vw)) and (y_gl >= vy) and (y_gl < (vy + vh))
+            if not inside:
+                self.lidar_2d_hover_valid = False
+                return
+            l, r, b, t = self.lidar_2d_ortho
+            nx = (float(mouse_x) - float(vx)) / float(vw)
+            ny = (float(y_gl) - float(vy)) / float(vh)
+            world_x = float(l) + nx * float(r - l)
+            world_z = float(b) + ny * float(t - b)
+            dist = math.sqrt((world_x * world_x) + (world_z * world_z))
+            # Inverse of local mapping used in lidar_thread.py:
+            # x = -r*sin(theta), z = -r*cos(theta) -> theta = atan2(-x, -z)
+            angle_deg = math.degrees(math.atan2(-world_x, -world_z))
+            self.lidar_2d_hover_x = world_x
+            self.lidar_2d_hover_z = world_z
+            self.lidar_2d_hover_dist = dist
+            self.lidar_2d_hover_angle_deg = angle_deg
+            self.lidar_2d_hover_nx = nx
+            self.lidar_2d_hover_ny = ny
+            self.lidar_2d_hover_valid = True
+
+    def draw_lidar_2d_hover_overlay(self):
+        vx, vy, vw, vh = self.lidar_2d_viewport
+        if vw <= 0 or vh <= 0:
+            return
+        if not self.lidar_2d_hover_valid:
+            return
+        glViewport(vx, vy, vw, vh)
+        glColor3f(0.92, 0.92, 0.92)
+        px = -1.0 + (2.0 * float(self.lidar_2d_hover_nx))
+        py = -1.0 + (2.0 * float(self.lidar_2d_hover_ny))
+        # Keep label near cursor but inside viewport.
+        tx = min(0.72, max(-0.98, px + 0.03))
+        ty = min(0.95, max(-0.92, py + 0.05))
+        self.print_GL(tx, ty, f"D:{self.lidar_2d_hover_dist:.2f}m A:{self.lidar_2d_hover_angle_deg:+.1f}deg")
+
+    def _lidar_angle_to_world_xz(self, angle_deg, radius):
+        rad = math.radians(float(angle_deg))
+        x = -float(radius) * math.sin(rad)
+        z = -float(radius) * math.cos(rad)
+        return x, z
+
+    def draw_lidar_2d_fov_overlay(self):
+        l, r, b, t = self.lidar_2d_ortho
+        a0 = -45.0
+        a1 = 225.0
+
+        ray_len = max(0.2, min(abs(l), abs(r), abs(b)) * 0.75)
+        arc_r = max(0.2, min(abs(l), abs(r), abs(b), abs(t)) * 0.85)
+
+        x0, z0 = self._lidar_angle_to_world_xz(a0, ray_len)
+        x1, z1 = self._lidar_angle_to_world_xz(a1, ray_len)
+
+        # Boundary rays
+        glLineWidth(1.5)
+        glColor3f(0.95, 0.82, 0.20)
+        glBegin(GL_LINES)
+        glVertex2f(0.0, 0.0)
+        glVertex2f(float(x0), float(z0))
+        glVertex2f(0.0, 0.0)
+        glVertex2f(float(x1), float(z1))
+        glEnd()
+
+        # Scan arc from -45 to 225 deg
+        glLineWidth(1.2)
+        glColor3f(0.90, 0.70, 0.18)
+        glBegin(GL_LINE_STRIP)
+        step = 3
+        for ang in range(int(a0), int(a1) + 1, step):
+            xa, za = self._lidar_angle_to_world_xz(float(ang), arc_r)
+            glVertex2f(float(xa), float(za))
+        glEnd()
+
+        # Labels near arc endpoints
+        tx0, tz0 = self._lidar_angle_to_world_xz(a0, arc_r * 1.12)
+        tx1, tz1 = self._lidar_angle_to_world_xz(a1, arc_r * 1.12)
+        glColor3f(0.95, 0.90, 0.80)
+        self.print_GL(float(tx0), float(tz0), "-45")
+        self.print_GL(float(tx1), float(tz1), "225")
 
     def draw_callback(self):
         if self.available:
@@ -675,6 +892,7 @@ class GLViewer:
 
             # Bottom-Left: LiDAR 2D View
             glViewport(0, 0, left_w, lidar_h)
+            self.lidar_2d_viewport = (0, 0, int(left_w), int(lidar_h))
             
             # Setup Orthographic Projection (Top-Down View)
             # Range: +/- 5 meters
@@ -685,7 +903,8 @@ class GLViewer:
             # X is Left/Right (-5, 5), Z is Forward/Backward (-10, 0) -> mapped to Y
             # Actually just map X->X, Z->Y for display
             # Range: Wide view
-            glOrtho(-3, 3, -6, 1, -1, 1) # X: -3m~3m, Z: -6m~1m (1m behind camera)
+            l, r, b, t = self.lidar_2d_ortho
+            glOrtho(l, r, b, t, -1, 1) # X: -3m~3m, Z: -6m~1m (1m behind camera)
             
             glMatrixMode(GL_MODELVIEW)
             glPushMatrix()
@@ -709,6 +928,7 @@ class GLViewer:
             glVertex2f(0.0, 0.0)
             glVertex2f(0.0, -1.0)
             glEnd()
+            self.draw_lidar_2d_fov_overlay()
             
             # Draw LiDAR Points (Project 3D points to 2D: X, Z)
             # Since point_handler uses a shader with MVP, we need to manually draw or transform
@@ -770,6 +990,7 @@ class GLViewer:
             for name in self.lidar_order:
                 if name in self.lidar_alert_handlers:
                     self.lidar_alert_handlers[name].draw(mvp_2d)
+            self.draw_lidar_2d_hover_overlay()
 
             # Restoring logic
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -871,6 +1092,13 @@ class GLViewer:
         glUseProgram(0)
 
         if include_lidar:
+            if self.robot_overlay_enabled:
+                if self.robot_body_fill is not None:
+                    self.robot_body_fill.draw(vpMat)
+                if self.robot_heading_fill is not None:
+                    self.robot_heading_fill.draw(vpMat)
+                if self.robot_body_outline is not None:
+                    self.robot_body_outline.draw(vpMat)
             glPointSize(5.0)
             for name in self.lidar_order:
                 self.lidar_handlers[name].draw(vpMat)

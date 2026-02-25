@@ -55,6 +55,68 @@ def transform_points_flat(points, t_4x4):
     return pts_w.reshape(-1).tolist()
 
 
+def load_robot_overlay_options(config):
+    overlay_cfg = config.get("robot_overlay", {})
+    return {
+        "enabled": bool(overlay_cfg.get("enabled", True)),
+        "length_m": float(overlay_cfg.get("length_m", 1.20)),
+        "width_m": float(overlay_cfg.get("width_m", 0.80)),
+        "center_offset_x_m": float(overlay_cfg.get("center_offset_x_m", 0.0)),
+        "center_offset_z_m": float(overlay_cfg.get("center_offset_z_m", 0.0)),
+        "height_offset_y_m": float(overlay_cfg.get("height_offset_y_m", 0.05)),
+        "heading_len_m": float(overlay_cfg.get("heading_len_m", 0.45)),
+    }
+
+
+def build_robot_overlay_world_from_pose(pose_4x4, options):
+    mat = _to_np_4x4(pose_4x4)
+    origin = np.array([float(mat[0, 3]), float(mat[1, 3]), float(mat[2, 3])], dtype=np.float64)
+    # Keep overlay planar to avoid roll/pitch distortion.
+    right = np.array([float(mat[0, 0]), 0.0, float(mat[2, 0])], dtype=np.float64)
+    forward = np.array([-float(mat[0, 2]), 0.0, -float(mat[2, 2])], dtype=np.float64)
+    nr = float(np.linalg.norm(right))
+    nf = float(np.linalg.norm(forward))
+    if nr < 1e-9:
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        right = right / nr
+    if nf < 1e-9:
+        forward = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    else:
+        forward = forward / nf
+
+    length_m = max(0.10, float(options.get("length_m", 1.20)))
+    width_m = max(0.10, float(options.get("width_m", 0.80)))
+    hl = length_m * 0.5
+    hw = width_m * 0.5
+    center = origin + (right * float(options.get("center_offset_x_m", 0.0))) + (forward * float(options.get("center_offset_z_m", 0.0)))
+    y = float(origin[1]) + float(options.get("height_offset_y_m", 0.05))
+
+    fl = center + (forward * hl) - (right * hw)
+    fr = center + (forward * hl) + (right * hw)
+    rr = center - (forward * hl) + (right * hw)
+    rl = center - (forward * hl) - (right * hw)
+    body_points_world = [
+        float(fl[0]), y, float(fl[2]),
+        float(fr[0]), y, float(fr[2]),
+        float(rr[0]), y, float(rr[2]),
+        float(rl[0]), y, float(rl[2]),
+    ]
+
+    heading_len = max(0.10, float(options.get("heading_len_m", 0.45)))
+    tip = center + (forward * (hl + heading_len))
+    base_center = center + (forward * (hl * 0.55))
+    half_base = max(0.05, width_m * 0.18)
+    left = base_center - (right * half_base)
+    right_pt = base_center + (right * half_base)
+    heading_points_world = [
+        float(tip[0]), y, float(tip[2]),
+        float(right_pt[0]), y, float(right_pt[2]),
+        float(left[0]), y, float(left[2]),
+    ]
+    return body_points_world, heading_points_world
+
+
 def setup_console_input():
     if os.name == "nt":
         return None
@@ -321,6 +383,7 @@ def main():
         "yaw_step_deg": 0.5,  # degree
     }
     alert_ui_state = load_lidar_alert_options(config)
+    robot_overlay_options = load_robot_overlay_options(config)
     profiles = config.get("profiles", {})
     if not isinstance(profiles, dict):
         profiles = {}
@@ -1063,6 +1126,18 @@ def main():
                 tracking_state = zed.get_position(pose, sl.REFERENCE_FRAME.WORLD)
                 update_robot_velocity_from_pose(pose)
                 update_control_status()
+                try:
+                    body_world, heading_world = build_robot_overlay_world_from_pose(
+                        pose.pose_data().m,
+                        robot_overlay_options,
+                    )
+                    viewer.set_robot_overlay(
+                        body_world,
+                        heading_world,
+                        enabled=(tracking_state == sl.POSITIONAL_TRACKING_STATE.OK and robot_overlay_options["enabled"]),
+                    )
+                except Exception:
+                    viewer.set_robot_overlay([], [], enabled=False)
                 if mapping_activated:
                     mapping_state = zed.get_spatial_mapping_state()
                 else:
