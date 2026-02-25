@@ -412,6 +412,22 @@ def main():
         "map_hz": 0.0,
         "lidar_pose_lag_ms": 0.0,
     }
+    calib_map_points = np.empty((0, 3), dtype=np.float32)
+    calib_last_compute_s = 0.0
+    calib_compute_interval_s = 0.35
+    calib_max_map_points = 6000
+    calib_max_lidar_points = 1200
+    calib_rmse_alpha = 0.2
+    calib_state = {
+        "active": False,
+        "selected_name": "",
+        "rmse_m": None,
+        "rmse_ema_m": None,
+        "sample_count": 0,
+        "map_point_count": 0,
+        "note": "idle",
+        "updated_at_s": None,
+    }
 
     try:
         console_input_state = setup_console_input()
@@ -594,6 +610,7 @@ def main():
                 },
                 "robot_velocity": dict(robot_velocity_state),
                 "profiles": sorted([str(k) for k in profiles.keys()]),
+                "calibration": dict(calib_state),
                 "lidars": items,
             }
 
@@ -663,6 +680,67 @@ def main():
 
             prev_pose_time_s = t_s
             prev_translation = cur_translation
+
+        def rebuild_calib_map_points():
+            nonlocal calib_map_points
+            pts_parts = []
+            try:
+                chunks = getattr(pymesh, "chunks", [])
+            except Exception:
+                chunks = []
+            for ch in chunks:
+                try:
+                    verts = np.asarray(ch.vertices, dtype=np.float32)
+                except Exception:
+                    continue
+                if verts.size == 0:
+                    continue
+                if verts.ndim == 1:
+                    if (verts.size % 3) != 0:
+                        continue
+                    xyz = verts.reshape(-1, 3)
+                else:
+                    xyz = verts.reshape(verts.shape[0], -1)[:, :3]
+                if xyz.shape[0] <= 0:
+                    continue
+                stride = max(1, int(xyz.shape[0] / 800))
+                pts_parts.append(xyz[::stride])
+            if not pts_parts:
+                calib_map_points = np.empty((0, 3), dtype=np.float32)
+                calib_state["map_point_count"] = 0
+                return
+            merged = np.concatenate(pts_parts, axis=0)
+            if merged.shape[0] > calib_max_map_points:
+                stride = max(1, int(merged.shape[0] / calib_max_map_points))
+                merged = merged[::stride]
+            calib_map_points = np.asarray(merged, dtype=np.float32)
+            calib_state["map_point_count"] = int(calib_map_points.shape[0])
+
+        def compute_rmse_points_to_map(points_world_flat):
+            if calib_map_points.shape[0] < 64:
+                return None, 0
+            if not points_world_flat:
+                return None, 0
+            pts = np.asarray(points_world_flat, dtype=np.float32).reshape(-1, 3)
+            if pts.shape[0] > calib_max_lidar_points:
+                stride = max(1, int(pts.shape[0] / calib_max_lidar_points))
+                pts = pts[::stride]
+            # Brute-force nearest distance (bounded point counts for realtime).
+            diff = pts[:, None, :] - calib_map_points[None, :, :]
+            d2 = np.sum(diff * diff, axis=2)
+            nearest = np.sqrt(np.min(d2, axis=1))
+            nearest = nearest[np.isfinite(nearest)]
+            if nearest.size < 16:
+                return None, int(nearest.size)
+            valid = nearest[(nearest > 0.02) & (nearest < 2.50)]
+            if valid.size < 16:
+                return None, int(valid.size)
+            p95 = float(np.percentile(valid, 95))
+            inlier = valid[valid <= p95]
+            if inlier.size < 16:
+                return None, int(inlier.size)
+            rmse = float(np.sqrt(np.mean(inlier * inlier)))
+            return rmse, int(inlier.size)
 
         def persist_profiles():
             nonlocal config
@@ -1013,6 +1091,27 @@ def main():
             if action == "save_spatial_map":
                 save_map_requested = True
                 return True
+            if action == "calibration_start":
+                target_name = str(payload.get("name", "")).strip()
+                if not target_name:
+                    selected = get_selected_lidar()
+                    target_name = selected.name if selected is not None else ""
+                calib_state["active"] = True
+                calib_state["selected_name"] = target_name
+                calib_state["rmse_m"] = None
+                calib_state["rmse_ema_m"] = None
+                calib_state["sample_count"] = 0
+                calib_state["updated_at_s"] = time.time()
+                calib_state["note"] = "running"
+                rebuild_calib_map_points()
+                print(f"[Calib] start target={target_name if target_name else 'selected'} map_pts={calib_state['map_point_count']}")
+                return True
+            if action == "calibration_stop":
+                calib_state["active"] = False
+                calib_state["note"] = "stopped"
+                calib_state["updated_at_s"] = time.time()
+                print("[Calib] stop")
+                return True
             ok = apply_offset_control(action, payload)
             if ok:
                 update_control_status()
@@ -1181,6 +1280,8 @@ def main():
                     if zed.get_spatial_map_request_status_async() == sl.ERROR_CODE.SUCCESS:
                         zed.retrieve_spatial_map_async(pymesh)
                         viewer.update_chunks()
+                        if calib_state["active"]:
+                            rebuild_calib_map_points()
                         if last_map_retrieve_time is not None:
                             dt = now_wall - float(last_map_retrieve_time)
                             if dt > 1e-6:
@@ -1229,6 +1330,39 @@ def main():
                         runtime_perf["lidar_pose_lag_ms"] = lag_avg
                     else:
                         runtime_perf["lidar_pose_lag_ms"] = (0.8 * float(runtime_perf["lidar_pose_lag_ms"])) + (0.2 * lag_avg)
+
+                if calib_state["active"] and (now_wall - float(calib_last_compute_s)) >= float(calib_compute_interval_s):
+                    calib_last_compute_s = now_wall
+                    if mapping_state == sl.SPATIAL_MAPPING_STATE.NOT_ENABLED:
+                        calib_state["note"] = "mapping_off"
+                    elif float(robot_velocity_state.get("speed_mps", 0.0)) > 0.03:
+                        calib_state["note"] = "robot_moving"
+                    else:
+                        target_name = str(calib_state.get("selected_name", "")).strip()
+                        if not target_name:
+                            selected = get_selected_lidar()
+                            target_name = selected.name if selected is not None else ""
+                            calib_state["selected_name"] = target_name
+                        target_frame = next((f for f in lidar_frames if str(f.get("name", "")) == target_name), None)
+                        if target_frame is None:
+                            calib_state["note"] = "target_missing"
+                        else:
+                            if calib_map_points.shape[0] < 64:
+                                rebuild_calib_map_points()
+                            rmse, n_used = compute_rmse_points_to_map(target_frame.get("points", []))
+                            calib_state["sample_count"] = int(n_used)
+                            calib_state["updated_at_s"] = now_wall
+                            if rmse is None:
+                                calib_state["note"] = "insufficient_points"
+                                calib_state["rmse_m"] = None
+                            else:
+                                calib_state["rmse_m"] = float(rmse)
+                                prev_ema = calib_state.get("rmse_ema_m", None)
+                                if prev_ema is None:
+                                    calib_state["rmse_ema_m"] = float(rmse)
+                                else:
+                                    calib_state["rmse_ema_m"] = ((1.0 - calib_rmse_alpha) * float(prev_ema)) + (calib_rmse_alpha * float(rmse))
+                                calib_state["note"] = "ok"
 
                 viewer.update_lidar_multi(lidar_frames)
                     
