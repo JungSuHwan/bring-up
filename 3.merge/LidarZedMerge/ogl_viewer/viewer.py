@@ -269,6 +269,47 @@ class PointHandler:
         glDisableVertexAttribArray(0)
         glUseProgram(0)
 
+
+class LineLoopHandler:
+    def __init__(self):
+        self.vbo = None
+        self.count = 0
+        self.shader = None
+        self.color = [1.0, 0.0, 0.0]
+        self.width = 2.0
+
+    def initialize(self):
+        self.shader = Shader(POINT_VERTEX_SHADER, POINT_FRAGMENT_SHADER)
+        self.u_mvp = glGetUniformLocation(self.shader.get_program_id(), "u_mvpMatrix")
+        self.u_color = glGetUniformLocation(self.shader.get_program_id(), "u_color")
+        self.vbo = glGenBuffers(1)
+
+    def update(self, points):
+        if not points:
+            self.count = 0
+            return
+        data = np.array(points, dtype=np.float32)
+        self.count = len(points) // 3
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_DYNAMIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def draw(self, mvp, color_override=None, width_override=None):
+        if self.count < 3:
+            return
+        glUseProgram(self.shader.get_program_id())
+        glUniformMatrix4fv(self.u_mvp, 1, GL_TRUE, (GLfloat * len(mvp))(*mvp))
+        color = color_override if color_override is not None else self.color
+        glUniform3fv(self.u_color, 1, color)
+        line_w = float(width_override) if width_override is not None else float(self.width)
+        glLineWidth(line_w)
+        glEnableVertexAttribArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glDrawArrays(GL_LINE_LOOP, 0, self.count)
+        glDisableVertexAttribArray(0)
+        glUseProgram(0)
+
 class GLViewer:
     """
     Class that manages the rendering in OpenGL
@@ -297,6 +338,10 @@ class GLViewer:
         self.lidar_alert_handlers = {}
         self.lidar_order = []
         self.lidar_status = {}
+        self.zone_warning_handler = None
+        self.zone_protect_handler = None
+        self.zone_enabled = False
+        self.zone_level_label = ""
         self.lidar_palette = [
             [0.20, 0.85, 0.20],  # green
             [0.20, 0.60, 1.00],  # blue
@@ -355,6 +400,15 @@ class GLViewer:
         self.shader_color_loc = glGetUniformLocation(self.shader_image.get_program_id(), "u_color")
         # Create the rendering camera
         self.set_render_camera_projection(_params)
+
+        self.zone_warning_handler = LineLoopHandler()
+        self.zone_warning_handler.initialize()
+        self.zone_warning_handler.color = [1.0, 0.82, 0.18]
+        self.zone_warning_handler.width = 2.0
+        self.zone_protect_handler = LineLoopHandler()
+        self.zone_protect_handler.initialize()
+        self.zone_protect_handler.color = [1.0, 0.2, 0.2]
+        self.zone_protect_handler.width = 3.0
 
         glLineWidth(1.)
         glPointSize(4.)
@@ -525,6 +579,21 @@ class GLViewer:
     def set_control_status(self, text):
         with self.mutex:
             self.control_status_text = str(text) if text is not None else ""
+
+    def set_safety_zone(self, protective_points_world, warning_points_world, enabled=True, level_label=""):
+        with self.mutex:
+            self.zone_enabled = bool(enabled)
+            self.zone_level_label = str(level_label) if level_label is not None else ""
+            if (not self.zone_enabled):
+                if self.zone_warning_handler is not None:
+                    self.zone_warning_handler.update([])
+                if self.zone_protect_handler is not None:
+                    self.zone_protect_handler.update([])
+                return
+            if self.zone_warning_handler is not None:
+                self.zone_warning_handler.update(warning_points_world if warning_points_world else [])
+            if self.zone_protect_handler is not None:
+                self.zone_protect_handler.update(protective_points_world if protective_points_world else [])
 
     def idle(self):
         if self.available:
@@ -871,6 +940,11 @@ class GLViewer:
         glUseProgram(0)
 
         if include_lidar:
+            if self.zone_enabled:
+                if self.zone_warning_handler is not None:
+                    self.zone_warning_handler.draw(vpMat)
+                if self.zone_protect_handler is not None:
+                    self.zone_protect_handler.draw(vpMat)
             glPointSize(5.0)
             for name in self.lidar_order:
                 self.lidar_handlers[name].draw(vpMat)

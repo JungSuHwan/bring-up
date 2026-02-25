@@ -189,6 +189,128 @@ def load_lidar_alert_options(config):
     }
 
 
+def load_safety_zone_options(config):
+    zone_cfg = config.get("safety_zone", {})
+    levels = zone_cfg.get("levels", [])
+    if not isinstance(levels, list):
+        levels = []
+    parsed_levels = []
+    for idx, lv in enumerate(levels):
+        if not isinstance(lv, dict):
+            continue
+        protective_margin = lv.get("protective_margin_m", lv.get("protective_radius_m", 0.0))
+        warning_margin = lv.get("warning_margin_m", lv.get("warning_radius_m", 0.0))
+        parsed_levels.append({
+            "name": str(lv.get("name", f"level_{idx + 1}")),
+            "speed_min_mps": float(lv.get("speed_min_mps", 0.0)),
+            "speed_max_mps": float(lv.get("speed_max_mps", 0.0)),
+            "protective_margin_m": float(protective_margin),
+            "warning_margin_m": float(warning_margin),
+        })
+    if not parsed_levels:
+        parsed_levels = [
+            {
+                "name": "Level 1",
+                "speed_min_mps": 0.0,
+                "speed_max_mps": 0.5,
+                "protective_margin_m": 0.6,
+                "warning_margin_m": 1.2,
+            },
+            {
+                "name": "Level 2",
+                "speed_min_mps": 0.5,
+                "speed_max_mps": 1.0,
+                "protective_margin_m": 1.2,
+                "warning_margin_m": 2.5,
+            },
+            {
+                "name": "Level 3",
+                "speed_min_mps": 1.0,
+                "speed_max_mps": 1.5,
+                "protective_margin_m": 2.0,
+                "warning_margin_m": 4.0,
+            },
+        ]
+    parsed_levels.sort(key=lambda x: float(x["speed_min_mps"]))
+    return {
+        "enabled": bool(zone_cfg.get("enabled", True)),
+        "vehicle": {
+            "length_m": float(zone_cfg.get("vehicle", {}).get("length_m", 1.2)),
+            "width_m": float(zone_cfg.get("vehicle", {}).get("width_m", 0.8)),
+            "center_offset_x_m": float(zone_cfg.get("vehicle", {}).get("center_offset_x_m", 0.0)),
+            "center_offset_z_m": float(zone_cfg.get("vehicle", {}).get("center_offset_z_m", 0.0)),
+            "height_offset_y_m": float(zone_cfg.get("vehicle", {}).get("height_offset_y_m", 0.05)),
+        },
+        "levels": parsed_levels,
+    }
+
+
+def select_safety_zone_level(speed_mps, options):
+    levels = options.get("levels", [])
+    if not levels:
+        return None
+    s = float(speed_mps)
+    for lv in levels:
+        if float(lv["speed_min_mps"]) <= s < float(lv["speed_max_mps"]):
+            return lv
+    if s < float(levels[0]["speed_min_mps"]):
+        return levels[0]
+    return levels[-1]
+
+
+def _build_rect_local_flat(length_m, width_m, center_x, center_z, y):
+    hl = max(0.01, float(length_m)) * 0.5
+    hw = max(0.01, float(width_m)) * 0.5
+    # Front is -Z in this project coordinate convention.
+    p1 = [center_x - hw, y, center_z - hl]
+    p2 = [center_x + hw, y, center_z - hl]
+    p3 = [center_x + hw, y, center_z + hl]
+    p4 = [center_x - hw, y, center_z + hl]
+    return p1 + p2 + p3 + p4
+
+
+def _build_rect_world_flat_from_pose(
+    pose_4x4,
+    length_m,
+    width_m,
+    center_offset_x_m,
+    center_offset_z_m,
+    height_offset_y_m,
+):
+    mat = _to_np_4x4(pose_4x4)
+    origin = np.array([float(mat[0, 3]), float(mat[1, 3]), float(mat[2, 3])], dtype=np.float64)
+    # Robot basis in world. Use planar components to avoid pitch/roll distortion on 2D safety zone.
+    right = np.array([float(mat[0, 0]), 0.0, float(mat[2, 0])], dtype=np.float64)
+    forward = np.array([-float(mat[0, 2]), 0.0, -float(mat[2, 2])], dtype=np.float64)
+    nr = float(np.linalg.norm(right))
+    nf = float(np.linalg.norm(forward))
+    if nr < 1e-9:
+        right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        right = right / nr
+    if nf < 1e-9:
+        forward = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    else:
+        forward = forward / nf
+
+    center = origin + (right * float(center_offset_x_m)) + (forward * float(center_offset_z_m))
+    y = float(origin[1]) + float(height_offset_y_m)
+    hl = max(0.01, float(length_m)) * 0.5
+    hw = max(0.01, float(width_m)) * 0.5
+
+    fl = center + (forward * hl) - (right * hw)  # front-left
+    fr = center + (forward * hl) + (right * hw)  # front-right
+    rr = center - (forward * hl) + (right * hw)  # rear-right
+    rl = center - (forward * hl) - (right * hw)  # rear-left
+
+    return [
+        float(fl[0]), y, float(fl[2]),
+        float(fr[0]), y, float(fr[2]),
+        float(rr[0]), y, float(rr[2]),
+        float(rl[0]), y, float(rl[2]),
+    ]
+
+
 def load_lidar_receivers(config_path, config=None):
     config_abs_path = os.path.abspath(config_path)
     print(f"[LiDAR] Using config: {config_abs_path}")
@@ -311,6 +433,7 @@ def main():
     display_options = load_display_options(config)
     web_options = load_web_options(config)
     zed_options = load_zed_options(config)
+    safety_zone_options = load_safety_zone_options(config)
     pc_window_enabled = display_options["pc_window_enabled"]
     web_enabled = bool(web_options["enabled"])
     web_host = web_options["host"]
@@ -521,6 +644,11 @@ def main():
                     "max_m": float(alert_ui_state["max_m"]),
                 },
                 "robot_velocity": dict(robot_velocity_state),
+                "safety_zone": {
+                    "enabled": bool(safety_zone_options["enabled"]),
+                    "vehicle": dict(safety_zone_options["vehicle"]),
+                    "levels": list(safety_zone_options["levels"]),
+                },
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "lidars": items,
             }
@@ -1063,6 +1191,49 @@ def main():
                 tracking_state = zed.get_position(pose, sl.REFERENCE_FRAME.WORLD)
                 update_robot_velocity_from_pose(pose)
                 update_control_status()
+                if safety_zone_options["enabled"]:
+                    try:
+                        mat_pose = _to_np_4x4(pose.pose_data().m)
+                        cur_level = select_safety_zone_level(
+                            float(robot_velocity_state.get("speed_mps", 0.0)),
+                            safety_zone_options,
+                        )
+                        if cur_level is not None:
+                            veh = safety_zone_options["vehicle"]
+                            base_len = float(veh["length_m"])
+                            base_wid = float(veh["width_m"])
+                            cx = float(veh["center_offset_x_m"])
+                            cz = float(veh["center_offset_z_m"])
+                            y = float(veh["height_offset_y_m"])
+                            prot_margin = float(cur_level["protective_margin_m"])
+                            warn_margin = float(cur_level["warning_margin_m"])
+
+                            protective_world = _build_rect_world_flat_from_pose(
+                                mat_pose,
+                                base_len + (2.0 * prot_margin),
+                                base_wid + (2.0 * prot_margin),
+                                cx,
+                                cz,
+                                y,
+                            )
+                            warning_world = _build_rect_world_flat_from_pose(
+                                mat_pose,
+                                base_len + (2.0 * warn_margin),
+                                base_wid + (2.0 * warn_margin),
+                                cx,
+                                cz,
+                                y,
+                            )
+                            viewer.set_safety_zone(
+                                protective_points_world=protective_world,
+                                warning_points_world=warning_world,
+                                enabled=True,
+                                level_label=str(cur_level["name"]),
+                            )
+                    except Exception:
+                        viewer.set_safety_zone([], [], enabled=False, level_label="")
+                else:
+                    viewer.set_safety_zone([], [], enabled=False, level_label="")
                 if mapping_activated:
                     mapping_state = zed.get_spatial_mapping_state()
                 else:

@@ -43,6 +43,39 @@
     "min_m": 0.0,
     "max_m": 0.5
   },
+  "safety_zone": {
+    "enabled": false,
+    "vehicle": {
+      "length_m": 1.2,
+      "width_m": 0.8,
+      "center_offset_x_m": 0.0,
+      "center_offset_z_m": 0.0,
+      "height_offset_y_m": 0.05
+    },
+    "levels": [
+      {
+        "name": "Level 1",
+        "speed_min_mps": 0.0,
+        "speed_max_mps": 0.5,
+        "protective_margin_m": 0.6,
+        "warning_margin_m": 1.2
+      },
+      {
+        "name": "Level 2",
+        "speed_min_mps": 0.5,
+        "speed_max_mps": 1.0,
+        "protective_margin_m": 1.2,
+        "warning_margin_m": 2.5
+      },
+      {
+        "name": "Level 3",
+        "speed_min_mps": 1.0,
+        "speed_max_mps": 1.5,
+        "protective_margin_m": 2.0,
+        "warning_margin_m": 4.0
+      }
+    ]
+  },
   "lidars": [
     {
       "name": "lidar_31",
