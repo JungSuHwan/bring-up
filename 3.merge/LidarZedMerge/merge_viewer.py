@@ -17,7 +17,10 @@ try:
     from scipy.spatial import cKDTree
     HAS_SCIPY = True
 except ImportError:
-    HAS_SCIPY = False
+    print("\n[Error] 'scipy' 라이브러리가 설치되어 있지 않습니다!")
+    print("LiDAR 캘리브레이션(KD-Tree 연산)을 위해 필수입니다.")
+    print("설치 명령어: pip install scipy\n")
+    sys.exit(1)
 
 if os.name == "nt":
     import msvcrt
@@ -27,6 +30,53 @@ else:
     import tty
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
+
+class DataLogger:
+    def __init__(self, log_root="logs"):
+        self.log_root = log_root
+        self.is_logging = False
+        self.session_dir = None
+        self.lidar_dir = None
+        self.timestamps = []
+        self.poses = []
+
+    def start_logging(self):
+        if self.is_logging: return
+        self.is_logging = True
+        
+        time_str = time.strftime("%Y%m%d_%H%M%S")
+        self.session_dir = os.path.join(self.log_root, f"session_{time_str}")
+        self.lidar_dir = os.path.join(self.session_dir, "lidar_points")
+        os.makedirs(self.lidar_dir, exist_ok=True)
+        
+        self.timestamps.clear()
+        self.poses.clear()
+        print(f"🔴 [DataLogger] Record started: {self.session_dir}")
+
+    def log_frame(self, timestamp, t_world_robot_4x4, lidar_pts_nx3):
+        if not self.is_logging: return
+        
+        self.timestamps.append(timestamp)
+        self.poses.append(np.array(t_world_robot_4x4, dtype=np.float32))
+        
+        if len(lidar_pts_nx3) > 0:
+            np.save(os.path.join(self.lidar_dir, f"{timestamp:.6f}.npy"), np.array(lidar_pts_nx3, dtype=np.float32))
+
+    def stop_logging(self, zed_map_points=None):
+        if not self.is_logging: return
+        self.is_logging = False
+        
+        np.savez_compressed(
+            os.path.join(self.session_dir, "trajectory.npz"),
+            timestamps=np.array(self.timestamps, dtype=np.float64),
+            poses=np.array(self.poses, dtype=np.float32)
+        )
+        
+        if zed_map_points is not None and len(zed_map_points) > 0:
+            np.save(os.path.join(self.session_dir, "zed_map.npy"), np.array(zed_map_points, dtype=np.float32))
+            
+        print(f"⬛ [DataLogger] Record stopped: {len(self.timestamps)} frames saved.")
+
 
 
 def _to_np_4x4(mat_like):
@@ -456,6 +506,8 @@ def main():
         "last_error": "",
     }
 
+    data_logger = DataLogger()
+
     try:
         console_input_state = setup_console_input()
         # Print SDK-default snapshots before any explicit program override.
@@ -636,6 +688,7 @@ def main():
                     "max_m": float(alert_ui_state["max_m"]),
                 },
                 "robot_velocity": dict(robot_velocity_state),
+                "is_logging": bool(data_logger.is_logging),
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "calibration": dict(calib_state),
                 "config_sync": dict(config_sync_state),
@@ -1344,6 +1397,12 @@ def main():
                 calib_state["updated_at_s"] = time.time()
                 print("[Calib] stop")
                 return True
+            if action == "record_start":
+                data_logger.start_logging()
+                return True
+            if action == "record_stop":
+                data_logger.stop_logging(zed_map_points=calib_map_points)
+                return True
             ok = apply_offset_control(action, payload)
             if ok:
                 update_control_status()
@@ -1558,6 +1617,12 @@ def main():
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         "yaw_deg": status.get("yaw_deg", 0.0),
                     })
+                    
+                    if data_logger.is_logging:
+                        target_n = str(calib_state.get("selected_name", "")).strip()
+                        if not target_n: target_n = lidars[0].name
+                        if lidar.name == target_n:
+                            data_logger.log_frame(frame_time_s if frame_time_s else now_wall, t_world_robot, pts_local)
                 if lag_samples_ms:
                     lag_avg = float(sum(lag_samples_ms) / max(1, len(lag_samples_ms)))
                     if float(runtime_perf["lidar_pose_lag_ms"]) <= 0.0:

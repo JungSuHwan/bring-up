@@ -1,0 +1,18 @@
+# Logs / Data Records
+log/
+logs/
+
+# Optional: Output map artifacts you might not want to track
+*.obj
+*.npz
+*.npy
+*.png
+
+# Python caching and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+Thumbs.db

@@ -92,6 +92,14 @@
     </div>
 
     <div class="card">
+      <div class="row">
+        <button id="recordStartBtn" type="button" style="border-color:#ff4444; color:#ff4444;">🔴 Record Start</button>
+        <button id="recordStopBtn" type="button" style="border-color:#888; color:#a0a0a0;">⬛ Record Stop</button>
+        <span id="recordInfo" class="status">Rec: OFF</span>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="grid">
         <div>X</div>
         <input id="xInput" type="number" step="0.001" />
@@ -143,6 +151,7 @@
     const alertMaxInput = $("alertMaxInput");
     const calibInfo = $("calibInfo");
     const syncInfo = $("syncInfo");
+    const recordInfo = $("recordInfo");
     let lastState = {};
 
     function fmtTime(sec) {
@@ -208,6 +217,11 @@
         const target = String(calib.selected_name || "-");
         const active = !!calib.active;
         calibInfo.textContent = `Calib:${active ? "ON" : "OFF"} target=${target} rmse=${rmseText}m ema=${rmseEmaText}m n=${n} map=${mp} note=${note}`;
+        
+        const isLogging = !!data.is_logging;
+        recordInfo.textContent = `Rec: ${isLogging ? "ON (Recording...)" : "OFF"}`;
+        recordInfo.style.color = isLogging ? "#ff4444" : "var(--text-dim)";
+        
         const sync = data.config_sync || {};
         const action = String(sync.last_action || "-");
         const loaded = fmtTime(sync.last_loaded_s);
@@ -291,7 +305,18 @@
         max_m: Number(alertMaxInput.value || 0),
       });
       await refreshState();
+      await refreshState();
     });
+    
+    $("recordStartBtn").addEventListener("click", async () => {
+      await apiControl("record_start");
+      await refreshState();
+    });
+    $("recordStopBtn").addEventListener("click", async () => {
+      await apiControl("record_stop");
+      await refreshState();
+    });
+
     $("calibStartBtn").addEventListener("click", async () => {
       await apiControl("calibration_start", { name: selectedName() });
       await refreshState();
