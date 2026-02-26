@@ -86,6 +86,7 @@
       <div class="row">
         <button id="calibStartBtn" type="button">Calibration Start</button>
         <button id="calibStopBtn" type="button">Calibration Stop</button>
+        <button id="autoIcpBtn" type="button" style="border-color:var(--accent); color:var(--accent);">Auto ICP (Match)</button>
         <span id="calibInfo" class="status">RMSE: -</span>
       </div>
     </div>
@@ -297,6 +298,11 @@
     });
     $("calibStopBtn").addEventListener("click", async () => {
       await apiControl("calibration_stop", {});
+      await refreshState();
+    });
+    $("autoIcpBtn").addEventListener("click", async () => {
+      $("calibInfo").textContent = "Auto ICP Running...";
+      await apiControl("auto_icp", { name: selectedName() });
       await refreshState();
     });
 

@@ -10,6 +10,12 @@ import ogl_viewer.viewer as gl
 import lidar_thread
 import web_stream
 
+try:
+    from scipy.spatial import cKDTree
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 if os.name == "nt":
     import msvcrt
 else:
@@ -183,6 +189,16 @@ def load_web_options(config):
         "enabled": bool(web_cfg.get("enabled", False)),
         "host": str(web_cfg.get("host", "0.0.0.0")),
         "port": int(web_cfg.get("port", 8080)),
+    }
+
+
+def load_calibration_options(config):
+    calib_cfg = config.get("calibration", {})
+    return {
+        "max_distance_m": float(calib_cfg.get("max_distance_m", 4.0)),
+        "vertical_range_m": float(calib_cfg.get("vertical_range_m", 0.35)),
+        "angle_min_deg": float(calib_cfg.get("angle_min_deg", -55.0)),
+        "angle_max_deg": float(calib_cfg.get("angle_max_deg", 230.0)),
     }
 
 
@@ -378,6 +394,7 @@ def main():
     web_enabled = bool(web_options["enabled"])
     web_host = web_options["host"]
     web_port = web_options["port"]
+    calib_options = load_calibration_options(config)
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
@@ -744,13 +761,19 @@ def main():
             map_h = np.concatenate([map_w, ones], axis=1)
             map_local = (t_inv @ map_h.T).T[:, :3].astype(np.float32)
 
+            # Parameters from config
+            max_r = calib_options["max_distance_m"]
+            vert_h = calib_options["vertical_range_m"]
+            a_min = calib_options["angle_min_deg"]
+            a_max = calib_options["angle_max_deg"]
+
             # LiDAR FOV-like ROI in local frame improves sensitivity to x/y/z/yaw tuning.
             mr = np.sqrt((map_local[:, 0] * map_local[:, 0]) + (map_local[:, 2] * map_local[:, 2]))
             ma = np.degrees(np.arctan2(-map_local[:, 0], -map_local[:, 2]))
             map_mask = (
-                (mr > 0.05) & (mr < 4.0) &
-                (np.abs(map_local[:, 1]) < 0.35) &
-                (ma >= -55.0) & (ma <= 230.0)
+                (mr > 0.05) & (mr < max_r) &
+                (np.abs(map_local[:, 1]) < vert_h) &
+                (ma >= a_min) & (ma <= a_max)
             )
             model = map_local[map_mask]
             if model.shape[0] < 64:
@@ -759,19 +782,25 @@ def main():
             pr = np.sqrt((pts[:, 0] * pts[:, 0]) + (pts[:, 2] * pts[:, 2]))
             pa = np.degrees(np.arctan2(-pts[:, 0], -pts[:, 2]))
             pts_mask = (
-                (pr > 0.05) & (pr < 4.0) &
-                (np.abs(pts[:, 1]) < 0.35) &
-                (pa >= -55.0) & (pa <= 230.0)
+                (pr > 0.05) & (pr < max_r) &
+                (np.abs(pts[:, 1]) < vert_h) &
+                (pa >= a_min) & (pa <= a_max)
             )
             pts = pts[pts_mask]
             if pts.shape[0] < 16:
                 return None, int(pts.shape[0])
 
-            # Brute-force nearest distance (bounded point counts for realtime).
-            diff = pts[:, None, :] - model[None, :, :]
-            d2 = np.sum(diff * diff, axis=2)
-            nearest = np.sqrt(np.min(d2, axis=1))
-            nearest = nearest[np.isfinite(nearest)]
+            if HAS_SCIPY:
+                tree = cKDTree(model)
+                distances, _ = tree.query(pts, k=1)
+                nearest = distances
+            else:
+                # Brute-force nearest distance (bounded point counts for realtime).
+                diff = pts[:, None, :] - model[None, :, :]
+                d2 = np.sum(diff * diff, axis=2)
+                nearest = np.sqrt(np.min(d2, axis=1))
+                nearest = nearest[np.isfinite(nearest)]
+
             if nearest.size < 16:
                 return None, int(nearest.size)
             valid = nearest[(nearest > 0.005) & (nearest < 1.25)]
@@ -1183,6 +1212,89 @@ def main():
                 if ok:
                     print(f"[Profile] deleted: {name}")
                 return ok
+            elif action == "auto_icp":
+                target_name = str(payload.get("name", "")).strip()
+                if not target_name:
+                    selected = get_selected_lidar()
+                    target_name = selected.name if selected is not None else ""
+                
+                target = next((l for l in lidars if l.name == target_name), None)
+                if target is None:
+                    print(f"[Auto ICP] Target {target_name} not found")
+                    return False
+
+                if calib_map_points.shape[0] < 64:
+                    print(f"[Auto ICP] Not enough ZED map points")
+                    return False
+                
+                pts_local = target.get_latest_points()
+                if not pts_local:
+                    print(f"[Auto ICP] No lidar points available")
+                    return False
+                
+                best_rmse = float('inf')
+                current_off = target.get_offset()
+                best_x, best_y, best_z, best_yaw = current_off["x"], current_off["y"], current_off["z"], target.get_yaw_deg()
+                
+                # Lock initial positions to prevent runaway drift on degenerate environments
+                init_x, init_z, init_yaw = best_x, best_z, best_yaw
+                max_drift_pos = 0.15  # maximum 15cm drift from initial position
+                max_drift_yaw = 30.0  # maximum 30 degrees drift
+                
+                def eval_target(x, y, z, yaw):
+                    t_robot_lidar = build_extrinsic_4x4({"x": x, "y": y, "z": z}, yaw)
+                    if not pose_history:
+                        t_world_robot = np.eye(4, dtype=np.float32)
+                    else:
+                        t_world_robot, _ = get_pose_nearest_to_time(None, np.eye(4, dtype=np.float32))
+                    t_world_lidar = np.dot(t_world_robot, t_robot_lidar)
+                    r, n = compute_rmse_points_to_map_local(pts_local, t_world_lidar)
+                    return r if r is not None else float('inf')
+
+                current_rmse = eval_target(best_x, best_y, best_z, best_yaw)
+                if current_rmse != float('inf'):
+                    best_rmse = current_rmse
+                
+                print(f"[Auto ICP] Starting... initial RMSE: {best_rmse:.5f}")
+                step_pos = 0.05
+                step_yaw = 2.0
+                
+                for _ in range(15):
+                    improved = False
+                    for dx, dy, dz, dyaw in [
+                        (step_pos,0,0,0), (-step_pos,0,0,0), 
+                        (0,0,step_pos,0), (0,0,-step_pos,0),
+                        (0,0,0,step_yaw), (0,0,0,-step_yaw)
+                    ]:
+                        nx = best_x + dx
+                        ny = best_y + dy
+                        nz = best_z + dz
+                        nyaw = best_yaw + dyaw
+                        
+                        # Apply bounds to prevent runway sliding along walls
+                        if abs(nx - init_x) > max_drift_pos:
+                            continue
+                        if abs(nz - init_z) > max_drift_pos:
+                            continue
+                        if abs(nyaw - init_yaw) > max_drift_yaw:
+                            continue
+                            
+                        r = eval_target(nx, ny, nz, nyaw)
+                        if r < best_rmse:
+                            best_rmse = r
+                            best_x, best_y, best_z, best_yaw = nx, ny, nz, nyaw
+                            improved = True
+                    if not improved:
+                        step_pos *= 0.5
+                        step_yaw *= 0.5
+                        if step_pos < 0.005 and step_yaw < 0.2:
+                            break
+                            
+                print(f"[Auto ICP] Done... final RMSE: {best_rmse:.5f}")
+                target.set_offset(x=best_x, y=best_y, z=best_z)
+                target.set_yaw_deg(best_yaw)
+                request_config_save()
+                return True
             else:
                 return False
 
