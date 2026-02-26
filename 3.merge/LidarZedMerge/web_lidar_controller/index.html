@@ -57,6 +57,9 @@
         <label for="lidarSel">LiDAR</label>
         <select id="lidarSel"></select>
         <button id="refreshBtn" type="button">Refresh</button>
+        <button id="saveJsonBtn" type="button">Save JSON</button>
+        <button id="reloadJsonBtn" type="button">Reload JSON</button>
+        <span id="syncInfo" class="status">Sync: -</span>
       </div>
     </div>
 
@@ -138,7 +141,17 @@
     const alertMinInput = $("alertMinInput");
     const alertMaxInput = $("alertMaxInput");
     const calibInfo = $("calibInfo");
+    const syncInfo = $("syncInfo");
     let lastState = {};
+
+    function fmtTime(sec) {
+      if (!sec || !Number.isFinite(Number(sec))) return "-";
+      const d = new Date(Number(sec) * 1000);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
 
     function isFieldEditing(el) {
       return document.activeElement === el;
@@ -194,6 +207,12 @@
         const target = String(calib.selected_name || "-");
         const active = !!calib.active;
         calibInfo.textContent = `Calib:${active ? "ON" : "OFF"} target=${target} rmse=${rmseText}m ema=${rmseEmaText}m n=${n} map=${mp} note=${note}`;
+        const sync = data.config_sync || {};
+        const action = String(sync.last_action || "-");
+        const loaded = fmtTime(sync.last_loaded_s);
+        const saved = fmtTime(sync.last_saved_s);
+        const err = String(sync.last_error || "");
+        syncInfo.textContent = `Sync:${action} loaded=${loaded} saved=${saved}${err ? ` err=${err}` : ""}`;
         if (selected) {
           const off = selected.offset || { x: 0, y: 0, z: 0 };
           if (!isFieldEditing(xInput)) xInput.value = Number(off.x || 0).toFixed(3);
@@ -248,6 +267,14 @@
     }
 
     $("refreshBtn").addEventListener("click", refreshState);
+    $("saveJsonBtn").addEventListener("click", async () => {
+      await apiControl("config_save_now", {});
+      await refreshState();
+    });
+    $("reloadJsonBtn").addEventListener("click", async () => {
+      await apiControl("config_reload_now", {});
+      await refreshState();
+    });
     $("applyStepBtn").addEventListener("click", async () => {
       await apiControl("offset_set_step", { step: Number(stepInput.value || 0.01) });
       await refreshState();

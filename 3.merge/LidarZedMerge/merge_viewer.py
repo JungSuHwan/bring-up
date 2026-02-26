@@ -428,6 +428,13 @@ def main():
         "note": "idle",
         "updated_at_s": None,
     }
+    config_sync_state = {
+        "path": str(config_path),
+        "last_loaded_s": time.time(),
+        "last_saved_s": None,
+        "last_action": "startup_load",
+        "last_error": "",
+    }
 
     try:
         console_input_state = setup_console_input()
@@ -611,6 +618,7 @@ def main():
                 "robot_velocity": dict(robot_velocity_state),
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "calibration": dict(calib_state),
+                "config_sync": dict(config_sync_state),
                 "lidars": items,
             }
 
@@ -716,27 +724,61 @@ def main():
             calib_map_points = np.asarray(merged, dtype=np.float32)
             calib_state["map_point_count"] = int(calib_map_points.shape[0])
 
-        def compute_rmse_points_to_map(points_world_flat):
+        def compute_rmse_points_to_map_local(points_local_flat, t_world_lidar):
             if calib_map_points.shape[0] < 64:
                 return None, 0
-            if not points_world_flat:
+            if not points_local_flat:
                 return None, 0
-            pts = np.asarray(points_world_flat, dtype=np.float32).reshape(-1, 3)
+            pts = np.asarray(points_local_flat, dtype=np.float32).reshape(-1, 3)
             if pts.shape[0] > calib_max_lidar_points:
                 stride = max(1, int(pts.shape[0] / calib_max_lidar_points))
                 pts = pts[::stride]
+
+            # Build map points in selected LiDAR local frame, then compare in local ROI.
+            try:
+                t_inv = np.linalg.inv(np.asarray(t_world_lidar, dtype=np.float64))
+            except Exception:
+                return None, 0
+            map_w = np.asarray(calib_map_points, dtype=np.float64)
+            ones = np.ones((map_w.shape[0], 1), dtype=np.float64)
+            map_h = np.concatenate([map_w, ones], axis=1)
+            map_local = (t_inv @ map_h.T).T[:, :3].astype(np.float32)
+
+            # LiDAR FOV-like ROI in local frame improves sensitivity to x/y/z/yaw tuning.
+            mr = np.sqrt((map_local[:, 0] * map_local[:, 0]) + (map_local[:, 2] * map_local[:, 2]))
+            ma = np.degrees(np.arctan2(-map_local[:, 0], -map_local[:, 2]))
+            map_mask = (
+                (mr > 0.05) & (mr < 4.0) &
+                (np.abs(map_local[:, 1]) < 0.35) &
+                (ma >= -55.0) & (ma <= 230.0)
+            )
+            model = map_local[map_mask]
+            if model.shape[0] < 64:
+                return None, int(model.shape[0])
+
+            pr = np.sqrt((pts[:, 0] * pts[:, 0]) + (pts[:, 2] * pts[:, 2]))
+            pa = np.degrees(np.arctan2(-pts[:, 0], -pts[:, 2]))
+            pts_mask = (
+                (pr > 0.05) & (pr < 4.0) &
+                (np.abs(pts[:, 1]) < 0.35) &
+                (pa >= -55.0) & (pa <= 230.0)
+            )
+            pts = pts[pts_mask]
+            if pts.shape[0] < 16:
+                return None, int(pts.shape[0])
+
             # Brute-force nearest distance (bounded point counts for realtime).
-            diff = pts[:, None, :] - calib_map_points[None, :, :]
+            diff = pts[:, None, :] - model[None, :, :]
             d2 = np.sum(diff * diff, axis=2)
             nearest = np.sqrt(np.min(d2, axis=1))
             nearest = nearest[np.isfinite(nearest)]
             if nearest.size < 16:
                 return None, int(nearest.size)
-            valid = nearest[(nearest > 0.02) & (nearest < 2.50)]
+            valid = nearest[(nearest > 0.005) & (nearest < 1.25)]
             if valid.size < 16:
                 return None, int(valid.size)
-            p95 = float(np.percentile(valid, 95))
-            inlier = valid[valid <= p95]
+            p90 = float(np.percentile(valid, 90))
+            inlier = valid[valid <= p90]
             if inlier.size < 16:
                 return None, int(inlier.size)
             rmse = float(np.sqrt(np.mean(inlier * inlier)))
@@ -829,9 +871,74 @@ def main():
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(disk_cfg, f, indent=2)
                 config = disk_cfg
+                config_sync_state["last_saved_s"] = time.time()
+                config_sync_state["last_action"] = "saved_to_disk"
+                config_sync_state["last_error"] = ""
                 return True
             except Exception as e:
                 print(f"[Config] Failed to save lidar config {config_path}: {e}")
+                config_sync_state["last_error"] = str(e)
+                config_sync_state["last_action"] = "save_failed"
+                return False
+
+        def reload_lidar_config_from_disk():
+            nonlocal config
+            try:
+                disk_cfg = load_config_json(config_path)
+                if not isinstance(disk_cfg, dict):
+                    disk_cfg = {}
+                # Apply alert threshold from disk.
+                alert_cfg = disk_cfg.get("lidar_2d_alert_threshold", {})
+                if isinstance(alert_cfg, dict):
+                    alert_ui_state["enabled"] = bool(alert_cfg.get("enabled", alert_ui_state["enabled"]))
+                    alert_ui_state["min_m"] = float(alert_cfg.get("min_m", alert_ui_state["min_m"]))
+                    alert_ui_state["max_m"] = float(alert_cfg.get("max_m", alert_ui_state["max_m"]))
+                    if alert_ui_state["min_m"] > alert_ui_state["max_m"]:
+                        alert_ui_state["min_m"], alert_ui_state["max_m"] = alert_ui_state["max_m"], alert_ui_state["min_m"]
+                    for lidar in lidars:
+                        lidar.set_alert_threshold(
+                            enabled=alert_ui_state["enabled"],
+                            min_m=alert_ui_state["min_m"],
+                            max_m=alert_ui_state["max_m"],
+                        )
+
+                # Apply offsets/yaw by lidar name from disk.
+                items = disk_cfg.get("lidars", [])
+                if not isinstance(items, list):
+                    items = []
+                by_name = {}
+                for one in items:
+                    if not isinstance(one, dict):
+                        continue
+                    name = str(one.get("name", "")).strip()
+                    if name:
+                        by_name[name] = one
+                for lidar in lidars:
+                    one = by_name.get(lidar.name, {})
+                    off = one.get("offset", {})
+                    if not isinstance(off, dict):
+                        off = {}
+                    rot = one.get("rotation", {})
+                    if not isinstance(rot, dict):
+                        rot = {}
+                    lidar.set_offset(
+                        x=off.get("x", None),
+                        y=off.get("y", None),
+                        z=off.get("z", None),
+                    )
+                    if "yaw_deg" in rot:
+                        lidar.set_yaw_deg(float(rot.get("yaw_deg", 0.0)))
+
+                config = disk_cfg
+                config_sync_state["last_loaded_s"] = time.time()
+                config_sync_state["last_action"] = "reloaded_from_disk"
+                config_sync_state["last_error"] = ""
+                print(f"[Config] Reloaded from disk: {config_path}")
+                return True
+            except Exception as e:
+                print(f"[Config] Failed to reload config {config_path}: {e}")
+                config_sync_state["last_error"] = str(e)
+                config_sync_state["last_action"] = "reload_failed"
                 return False
 
         def apply_offset_control(action, payload):
@@ -1087,10 +1194,20 @@ def main():
             return True
 
         def dispatch_control(action, payload):
-            nonlocal save_map_requested
+            nonlocal save_map_requested, pending_config_save
             if action == "save_spatial_map":
                 save_map_requested = True
                 return True
+            if action == "config_save_now":
+                ok = persist_lidar_config()
+                if ok:
+                    pending_config_save = False
+                return ok
+            if action == "config_reload_now":
+                ok = reload_lidar_config_from_disk()
+                if ok:
+                    update_control_status()
+                return ok
             if action == "calibration_start":
                 target_name = str(payload.get("name", "")).strip()
                 if not target_name:
@@ -1295,6 +1412,7 @@ def main():
                 # (C) LiDAR Data Update (multi-lidar)
                 lidar_frames = []
                 lag_samples_ms = []
+                calib_inputs = {}
                 for lidar in lidars:
                     pts_local = lidar.get_latest_points()
                     alert_pts_local = lidar.get_latest_alert_points()
@@ -1313,6 +1431,7 @@ def main():
                         status.get("yaw_deg", 0.0),
                     )
                     t_world_lidar = np.dot(t_world_robot, t_robot_lidar)
+                    calib_inputs[lidar.name] = (pts_local, t_world_lidar)
                     pts_world = transform_points_flat(pts_local, t_world_lidar)
                     alert_pts_world = transform_points_flat(alert_pts_local, t_world_lidar)
                     lidar_frames.append({
@@ -1349,7 +1468,11 @@ def main():
                         else:
                             if calib_map_points.shape[0] < 64:
                                 rebuild_calib_map_points()
-                            rmse, n_used = compute_rmse_points_to_map(target_frame.get("points", []))
+                            calib_input = calib_inputs.get(target_name, None)
+                            if calib_input is None:
+                                rmse, n_used = None, 0
+                            else:
+                                rmse, n_used = compute_rmse_points_to_map_local(calib_input[0], calib_input[1])
                             calib_state["sample_count"] = int(n_used)
                             calib_state["updated_at_s"] = now_wall
                             if rmse is None:
