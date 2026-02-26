@@ -43,6 +43,12 @@
     "min_m": 0.0,
     "max_m": 0.8
   },
+  "calibration": {
+    "max_distance_m": 4.0,
+    "vertical_range_m": 0.35,
+    "angle_min_deg": -55.0,
+    "angle_max_deg": 230.0
+  },
   "lidars": [
     {
       "name": "lidar_31",
