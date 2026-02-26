@@ -25,6 +25,33 @@ class LidarReceiver(threading.Thread):
     ):
         super().__init__()
         self.ip = ip
+
+import threading
+import socket
+import time
+import math
+import numpy as np
+
+# --- Constants ---
+STX = b'\x02'
+ETX = b'\x03'
+
+class LidarReceiver(threading.Thread):
+    def __init__(
+        self,
+        ip='192.168.0.31',
+        port=8000,
+        name='lidar',
+        offset_x=-0.12,
+        offset_y=0.0,
+        offset_z=0.0,
+        yaw_deg=0.0,
+        alert_enabled=False,
+        alert_min_m=0.0,
+        alert_max_m=1.0,
+    ):
+        super().__init__()
+        self.ip = ip
         self.port = port
         self.name = name
         self.running = False
@@ -33,6 +60,9 @@ class LidarReceiver(threading.Thread):
         self.lock = threading.Lock()
         self.latest_points_3d = [] # List of [x, y, z]
         self.latest_alert_points_3d = [] # Points within configured range threshold
+        self.latest_angles_rad = []  # Per-point angle (radians) for deskewing
+        self.scan_start_time = None  # Wall time of first point in scan
+        self.scan_end_time = None    # Wall time of last point in scan
         self.last_connect_log_time = 0.0
         self.last_frame_time = None
         self.frame_rate_hz = 0.0
@@ -219,10 +249,26 @@ class LidarReceiver(threading.Thread):
             # Convert to 3D Points
             points = []
             alert_points = []
+            angles_rad_list = []  # 각 유효 포인트의 각도(radian) 저장 (deskewing용)
             with self.lock:
                 alert_enabled = bool(self.alert_enabled)
                 alert_min = float(self.alert_min_m)
                 alert_max = float(self.alert_max_m)
+
+            # ── [3단계] 스캔 타이밍 계산 ──────────────────────────────────────────
+            # LiDAR 한 스캔의 총 각도 범위를 이용해 각 포인트별 서브 타임스탬프를 계산.
+            # 스캔 시작=현재 시간 - 스캔 주기(1/fps), 스캔 끝=현재 시간 으로 가정.
+            now_scan = time.time()
+            with self.lock:
+                prev_fps = float(self.frame_rate_hz)
+            if prev_fps > 1.0:
+                scan_duration = 1.0 / prev_fps
+            else:
+                scan_duration = 1.0 / 15.0  # fallback: 15Hz (0.0666...s)
+            scan_t0 = now_scan - scan_duration  # 스캔 시작 시간 (추정)
+            scan_t1 = now_scan                  # 스캔 종료 시간
+            # ─────────────────────────────────────────────────────────────────────
+
             angle_curr = angle_begin
             for r in ranges:
                 if r > 0.05:
@@ -284,6 +330,7 @@ class LidarReceiver(threading.Thread):
                     points.append(x_gl) # x
                     points.append(y_gl) # y
                     points.append(z_gl) # z
+                    angles_rad_list.append(rad)  # deskewing용 각도 저장
 
                     if alert_enabled and (alert_min <= r <= alert_max):
                         alert_points.append(x_gl)
@@ -295,6 +342,9 @@ class LidarReceiver(threading.Thread):
             with self.lock:
                 self.latest_points_3d = points # Flat list [x, y, z, x, y, z...] or simple list of lists
                 self.latest_alert_points_3d = alert_points
+                self.latest_angles_rad = angles_rad_list  # deskewing용 각도 리스트
+                self.scan_start_time = scan_t0
+                self.scan_end_time   = scan_t1
                 now = time.time()
                 if self.last_frame_time is not None:
                     dt = now - self.last_frame_time
@@ -313,6 +363,23 @@ class LidarReceiver(threading.Thread):
     def get_latest_points(self):
         with self.lock:
             return list(self.latest_points_3d) # Return copy
+
+    def get_latest_points_with_timing(self):
+        """[3단계] Motion Deskewing용: 포인트, 각도, 스캔 타이밍을 함께 반환.
+
+        Returns:
+            flat_points (list): [x,y,z, x,y,z, ...] 형태의 LiDAR local 좌표
+            angles_rad  (list): 포인트별 각도 (radian), len == len(flat_points)//3
+            scan_t0     (float|None): 스캔 시작 wall time
+            scan_t1     (float|None): 스캔 종료 wall time
+        """
+        with self.lock:
+            return (
+                list(self.latest_points_3d),
+                list(self.latest_angles_rad),
+                self.scan_start_time,
+                self.scan_end_time,
+            )
 
     def get_latest_alert_points(self):
         with self.lock:

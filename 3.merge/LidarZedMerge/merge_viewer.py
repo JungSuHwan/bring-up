@@ -15,6 +15,7 @@ import web_stream
 
 try:
     from scipy.spatial import cKDTree
+    from scipy.spatial.transform import Rotation, Slerp
     HAS_SCIPY = True
 except ImportError:
     print("\n[Error] 'scipy' 라이브러리가 설치되어 있지 않습니다!")
@@ -113,6 +114,123 @@ def transform_points_flat(points, t_4x4):
     pts_h = np.concatenate([pts, ones], axis=1)
     pts_w = (t_4x4 @ pts_h.T).T[:, :3]
     return pts_w.reshape(-1).tolist()
+
+
+def _interpolate_pose_from_history(eval_time, pose_hist):
+    """[3단계] pose_history deque에서 eval_time에 가장 가까운 두 pose를
+    Slerp(회전)/Lerp(위치) 보간하여 4x4 행렬을 반환.
+
+    Args:
+        eval_time: 보간 목표 wall time (float)
+        pose_hist: deque of (wall_time, pose_4x4_np)
+    Returns:
+        np.ndarray (4,4) or None
+    """
+    if not pose_hist:
+        return None
+    hist_list = list(pose_hist)
+    if len(hist_list) == 1:
+        return hist_list[0][1]
+
+    # eval_time 기준 바로 앞/뒤 샘플 탐색
+    before = None
+    after = None
+    for t_s, mat in hist_list:
+        if float(t_s) <= float(eval_time):
+            if before is None or float(t_s) > float(before[0]):
+                before = (t_s, mat)
+        else:
+            if after is None or float(t_s) < float(after[0]):
+                after = (t_s, mat)
+
+    if before is None:
+        return hist_list[0][1]
+    if after is None:
+        return hist_list[-1][1]
+
+    t0, m0 = float(before[0]), before[1]
+    t1, m1 = float(after[0]),  after[1]
+    dt = t1 - t0
+    if dt < 1e-9:
+        return m0
+
+    alpha = (float(eval_time) - t0) / dt
+    alpha = max(0.0, min(1.0, alpha))
+
+    # Translation Lerp
+    trans = m0[:3, 3] + alpha * (m1[:3, 3] - m0[:3, 3])
+
+    # Rotation Slerp
+    try:
+        key_rots = Rotation.from_matrix(np.stack([m0[:3, :3], m1[:3, :3]]))
+        slerp_fn  = Slerp([0.0, 1.0], key_rots)
+        interp_rot = slerp_fn([alpha])[0].as_matrix()
+    except Exception:
+        interp_rot = m0[:3, :3]
+
+    out = np.eye(4, dtype=np.float32)
+    out[:3, :3] = interp_rot
+    out[:3, 3]  = trans
+    return out
+
+
+def deskew_lidar_points_world(
+    pts_local_flat,
+    angles_rad,
+    scan_t0,
+    scan_t1,
+    t_robot_lidar,
+    pose_hist,
+):
+    """[3단계] Motion Deskewing: 각 포인트의 각도 비율로 스캔 내 시간을 추정하고,
+    그 시간의 로봇 pose를 보간해 world frame 좌표를 계산.
+
+    포인트 순서 = 각도 순서(0도→max도)라 가정.
+    alpha_i = (angle_i - angle_min) / (angle_max - angle_min)
+    eval_time_i = scan_t0 + alpha_i * (scan_t1 - scan_t0)
+
+    Args:
+        pts_local_flat: [x,y,z, ...] LiDAR local 좌표 (float list)
+        angles_rad:     포인트별 각도 (len = N)
+        scan_t0:        스캔 시작 wall time
+        scan_t1:        스캔 종료 wall time
+        t_robot_lidar:  로봇→LiDAR 외부 보정 행렬 (4x4 np.ndarray)
+        pose_hist:      deque of (wall_time, pose_4x4)
+    Returns:
+        list: world frame 좌표 [x,y,z, ...] (flat)
+    """
+    if not pts_local_flat or not angles_rad:
+        return []
+
+    pts = np.asarray(pts_local_flat, dtype=np.float32).reshape(-1, 3)
+    n = pts.shape[0]
+    if n == 0 or len(angles_rad) != n:
+        return []
+    if scan_t0 is None or scan_t1 is None:
+        return []
+
+    a_arr = np.asarray(angles_rad, dtype=np.float64)
+    a_min, a_max = float(a_arr.min()), float(a_arr.max())
+    span = a_max - a_min
+    if span < 1e-6:
+        alphas = np.zeros(n, dtype=np.float64)
+    else:
+        alphas = (a_arr - a_min) / span
+
+    dt_scan = float(scan_t1) - float(scan_t0)
+    eval_times = float(scan_t0) + alphas * dt_scan  # (N,)
+
+    world_pts = np.zeros((n, 3), dtype=np.float32)
+    ones_col = np.ones((1, 1), dtype=np.float32)
+    for i in range(n):
+        t_world_robot_i = _interpolate_pose_from_history(eval_times[i], pose_hist)
+        if t_world_robot_i is None:
+            continue
+        t_world_lidar_i = np.dot(t_world_robot_i, t_robot_lidar).astype(np.float32)
+        pt_h = np.array([[pts[i, 0], pts[i, 1], pts[i, 2], 1.0]], dtype=np.float32)
+        world_pts[i] = (t_world_lidar_i @ pt_h.T).T[0, :3]
+
+    return world_pts.reshape(-1).tolist()
 
 
 def load_robot_overlay_options(config):
@@ -252,6 +370,17 @@ def load_calibration_options(config):
         "vertical_range_m": float(calib_cfg.get("vertical_range_m", 0.35)),
         "angle_min_deg": float(calib_cfg.get("angle_min_deg", -55.0)),
         "angle_max_deg": float(calib_cfg.get("angle_max_deg", 230.0)),
+    }
+
+
+def load_deskewing_options(config):
+    """[3단계] Motion Deskewing 설정 로드."""
+    ds_cfg = config.get("deskewing", {})
+    return {
+        "enabled": bool(ds_cfg.get("enabled", True)),
+        # deskewing 적용 최소 속도(m/s): 이 이상 움직일 때만 보정.
+        # 정지 상태에서는 불필요한 보간 연산을 피하기 위해 스킵.
+        "min_speed_mps": float(ds_cfg.get("min_speed_mps", 0.02)),
     }
 
 
@@ -448,6 +577,8 @@ def main():
     web_host = web_options["host"]
     web_port = web_options["port"]
     calib_options = load_calibration_options(config)
+    deskewing_options = load_deskewing_options(config)
+    print(f"[Deskewing] enabled={deskewing_options['enabled']} min_speed={deskewing_options['min_speed_mps']}m/s")
     offset_ui_state = {
         "selected_idx": 0,
         "step": 0.01,  # meter
@@ -1587,8 +1718,18 @@ def main():
                 lidar_frames = []
                 lag_samples_ms = []
                 calib_inputs = {}
+
+                # [3단계] deskewing 적용 조건 확인
+                use_deskewing = (
+                    deskewing_options["enabled"]
+                    and float(robot_velocity_state.get("speed_mps", 0.0))
+                    >= float(deskewing_options["min_speed_mps"])
+                    and len(pose_history) >= 2
+                )
+
                 for lidar in lidars:
-                    pts_local = lidar.get_latest_points()
+                    # [3단계] 타이밍 정보 포함 데이터 취득
+                    pts_local, angles_rad, scan_t0, scan_t1 = lidar.get_latest_points_with_timing()
                     alert_pts_local = lidar.get_latest_alert_points()
                     status = lidar.get_status()
                     frame_time_s = status.get("frame_time_s", None)
@@ -1606,7 +1747,20 @@ def main():
                     )
                     t_world_lidar = np.dot(t_world_robot, t_robot_lidar)
                     calib_inputs[lidar.name] = (pts_local, t_world_lidar)
-                    pts_world = transform_points_flat(pts_local, t_world_lidar)
+
+                    # [3단계] deskewing 적용 여부에 따라 world 좌표 계산 방법 분기
+                    if use_deskewing and scan_t0 is not None and scan_t1 is not None and len(angles_rad) == len(pts_local) // 3:
+                        pts_world = deskew_lidar_points_world(
+                            pts_local,
+                            angles_rad,
+                            scan_t0,
+                            scan_t1,
+                            t_robot_lidar,
+                            pose_history,
+                        )
+                    else:
+                        pts_world = transform_points_flat(pts_local, t_world_lidar)
+
                     alert_pts_world = transform_points_flat(alert_pts_local, t_world_lidar)
                     lidar_frames.append({
                         "name": lidar.name,
@@ -1616,8 +1770,9 @@ def main():
                         "fps": status.get("fps", 0.0),
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         "yaw_deg": status.get("yaw_deg", 0.0),
+                        "deskewed": use_deskewing,  # 웹 UI에 deskewing 상태 전달
                     })
-                    
+
                     if data_logger.is_logging:
                         target_n = str(calib_state.get("selected_name", "")).strip()
                         if not target_n: target_n = lidars[0].name

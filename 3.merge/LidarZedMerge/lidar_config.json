@@ -43,6 +43,10 @@
     "min_m": 0.0,
     "max_m": 0.8
   },
+  "deskewing": {
+    "enabled": true,
+    "min_speed_mps": 0.02
+  },
   "calibration": {
     "max_distance_m": 4.0,
     "vertical_range_m": 0.35,
@@ -56,12 +60,12 @@
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
-        "x": 0.0675,
+        "x": -0.05124999999999998,
         "y": 0.0,
-        "z": -0.23750000000000004
+        "z": -0.28750000000000003
       },
       "rotation": {
-        "yaw_deg": 45.75
+        "yaw_deg": 58.25
       }
     },
     {
