@@ -1,3 +1,6 @@
+"""
+[1단계: 녹화 로깅 기능]**과 [2단계: 오프라인 분석 스크립트] 구현 준비
+"""
 import sys
 import time
 import json
