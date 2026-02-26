@@ -365,11 +365,36 @@ def load_web_options(config):
 
 def load_calibration_options(config):
     calib_cfg = config.get("calibration", {})
+    roi_cfg = calib_cfg.get("roi_local_xyz", {})
+    near_cfg = calib_cfg.get("near_range_suppression", {})
+
+    def _opt_float(v):
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
     return {
         "max_distance_m": float(calib_cfg.get("max_distance_m", 4.0)),
         "vertical_range_m": float(calib_cfg.get("vertical_range_m", 0.35)),
         "angle_min_deg": float(calib_cfg.get("angle_min_deg", -55.0)),
         "angle_max_deg": float(calib_cfg.get("angle_max_deg", 230.0)),
+        "roi_local_xyz": {
+            "enabled": bool(roi_cfg.get("enabled", False)),
+            "x_min": _opt_float(roi_cfg.get("x_min", None)),
+            "x_max": _opt_float(roi_cfg.get("x_max", None)),
+            "y_min": _opt_float(roi_cfg.get("y_min", None)),
+            "y_max": _opt_float(roi_cfg.get("y_max", None)),
+            "z_min": _opt_float(roi_cfg.get("z_min", None)),
+            "z_max": _opt_float(roi_cfg.get("z_max", None)),
+        },
+        "near_range_suppression": {
+            "enabled": bool(near_cfg.get("enabled", True)),
+            "min_effective_range_m": float(near_cfg.get("min_effective_range_m", 0.40)),
+            "distance_weight_power": float(near_cfg.get("distance_weight_power", 1.0)),
+        },
     }
 
 
@@ -953,6 +978,36 @@ def main():
             vert_h = calib_options["vertical_range_m"]
             a_min = calib_options["angle_min_deg"]
             a_max = calib_options["angle_max_deg"]
+            roi_cfg = calib_options.get("roi_local_xyz", {})
+            roi_enabled = bool(roi_cfg.get("enabled", False))
+            rx_min = roi_cfg.get("x_min", None)
+            rx_max = roi_cfg.get("x_max", None)
+            ry_min = roi_cfg.get("y_min", None)
+            ry_max = roi_cfg.get("y_max", None)
+            rz_min = roi_cfg.get("z_min", None)
+            rz_max = roi_cfg.get("z_max", None)
+            near_cfg = calib_options.get("near_range_suppression", {})
+            near_enabled = bool(near_cfg.get("enabled", True))
+            min_r_eff = max(0.05, float(near_cfg.get("min_effective_range_m", 0.40)))
+            weight_pow = max(0.0, float(near_cfg.get("distance_weight_power", 1.0)))
+
+            def apply_local_roi(mask, arr):
+                if not roi_enabled:
+                    return mask
+                out = mask
+                if rx_min is not None:
+                    out = out & (arr[:, 0] >= float(rx_min))
+                if rx_max is not None:
+                    out = out & (arr[:, 0] <= float(rx_max))
+                if ry_min is not None:
+                    out = out & (arr[:, 1] >= float(ry_min))
+                if ry_max is not None:
+                    out = out & (arr[:, 1] <= float(ry_max))
+                if rz_min is not None:
+                    out = out & (arr[:, 2] >= float(rz_min))
+                if rz_max is not None:
+                    out = out & (arr[:, 2] <= float(rz_max))
+                return out
 
             # LiDAR FOV-like ROI in local frame improves sensitivity to x/y/z/yaw tuning.
             mr = np.sqrt((map_local[:, 0] * map_local[:, 0]) + (map_local[:, 2] * map_local[:, 2]))
@@ -962,6 +1017,9 @@ def main():
                 (np.abs(map_local[:, 1]) < vert_h) &
                 (ma >= a_min) & (ma <= a_max)
             )
+            if near_enabled:
+                map_mask = map_mask & (mr >= min_r_eff)
+            map_mask = apply_local_roi(map_mask, map_local)
             model = map_local[map_mask]
             if model.shape[0] < 64:
                 return None, int(model.shape[0])
@@ -973,6 +1031,9 @@ def main():
                 (np.abs(pts[:, 1]) < vert_h) &
                 (pa >= a_min) & (pa <= a_max)
             )
+            if near_enabled:
+                pts_mask = pts_mask & (pr >= min_r_eff)
+            pts_mask = apply_local_roi(pts_mask, pts)
             pts = pts[pts_mask]
             if pts.shape[0] < 16:
                 return None, int(pts.shape[0])
@@ -997,7 +1058,14 @@ def main():
             inlier = valid[valid <= p90]
             if inlier.size < 16:
                 return None, int(inlier.size)
-            rmse = float(np.sqrt(np.mean(inlier * inlier)))
+            if near_enabled and weight_pow > 0.0:
+                # Suppress close-range domination by up-weighting farther inliers.
+                denom = max(1e-6, max_r - min_r_eff)
+                w = np.power(np.clip((inlier - min_r_eff) / denom, 0.0, 1.0), weight_pow)
+                w = 0.2 + (0.8 * w)  # keep non-zero baseline weight
+                rmse = float(np.sqrt(np.sum(w * inlier * inlier) / np.sum(w)))
+            else:
+                rmse = float(np.sqrt(np.mean(inlier * inlier)))
             return rmse, int(inlier.size)
 
         def persist_profiles():

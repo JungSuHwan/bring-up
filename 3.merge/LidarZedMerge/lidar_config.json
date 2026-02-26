@@ -51,7 +51,21 @@
     "max_distance_m": 4.0,
     "vertical_range_m": 0.35,
     "angle_min_deg": -55.0,
-    "angle_max_deg": 230.0
+    "angle_max_deg": 230.0,
+    "roi_local_xyz": {
+      "enabled": false,
+      "x_min": null,
+      "x_max": null,
+      "y_min": null,
+      "y_max": null,
+      "z_min": null,
+      "z_max": null
+    },
+    "near_range_suppression": {
+      "enabled": true,
+      "min_effective_range_m": 0.4,
+      "distance_weight_power": 1.0
+    }
   },
   "lidars": [
     {
