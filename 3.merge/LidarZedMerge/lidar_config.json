@@ -40,18 +40,18 @@
   },
   "lidar_2d_alert_threshold": {
     "enabled": true,
-    "min_m": 0.35,
-    "max_m": 0.4
+    "min_m": 0.1,
+    "max_m": 0.27
   },
   "lidar_view_angle": {
     "min_deg": -45.0,
     "max_deg": 225.0
   },
   "calibration": {
-    "max_distance_m": 4.0,
-    "vertical_range_m": 0.35,
-    "angle_min_deg": -55.0,
-    "angle_max_deg": 230.0
+    "max_distance_m": 2.0,
+    "vertical_range_m": 0.25,
+    "angle_min_deg": -40.0,
+    "angle_max_deg": 225.0
   },
   "lidars": [
     {
@@ -60,12 +60,12 @@
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
-        "x": -0.14874999999999997,
-        "y": 0.020000000000000004,
-        "z": -0.01749999999999999
+        "x": -0.36,
+        "y": -0.049999999999999996,
+        "z": 0.0
       },
       "rotation": {
-        "yaw_deg": -1.0625
+        "yaw_deg": 0.0
       }
     },
     {

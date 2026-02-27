@@ -405,6 +405,33 @@ class GLViewer:
         self.lidar_2d_hover_angle_deg = 0.0
         self.lidar_2d_hover_nx = 0.0
         self.lidar_2d_hover_ny = 0.0
+        self.rgb_viewport = (0, 0, 1, 1)
+        self.mesh_viewport = (0, 0, 1, 1)
+        self.last_mesh_mvp = np.identity(4, dtype=np.float32)
+        self.cam_fx = 0.0
+        self.cam_fy = 0.0
+        self.cam_cx = 0.0
+        self.cam_cy = 0.0
+        self.rgb_img_w = 1
+        self.rgb_img_h = 1
+        self.pick_handler = None
+        self.pick_world_valid = False
+        self.pick_world = np.zeros(3, dtype=np.float32)
+        self.pick_rgb_valid = False
+        self.pick_rgb_u = 0.0
+        self.pick_rgb_v = 0.0
+        self.pick_lidar_valid = False
+        self.pick_lidar_name = ""
+        self.pick_lidar_x = 0.0
+        self.pick_lidar_z = 0.0
+        self.pick_lidar_dist = 0.0
+        self.pick_lidar_ang = 0.0
+        self.pick_err_world_m = float("nan")
+        self.pick_nearest_world = np.zeros(3, dtype=np.float32)
+        self.pick_nearest_valid = False
+        self.pick_records = []
+        self.pick_seq = 0
+        self.max_pick_records = 12
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
@@ -435,6 +462,12 @@ class GLViewer:
         self.image_handler.initialize(_params.image_size)
         if _params.image_size.height > 0:
             self.rgb_aspect_ratio = float(_params.image_size.width) / float(_params.image_size.height)
+            self.rgb_img_w = int(_params.image_size.width)
+            self.rgb_img_h = int(_params.image_size.height)
+        self.cam_fx = float(getattr(_params, "fx", 0.0))
+        self.cam_fy = float(getattr(_params, "fy", 0.0))
+        self.cam_cx = float(getattr(_params, "cx", 0.0))
+        self.cam_cy = float(getattr(_params, "cy", 0.0))
         
         self.init_mesh(_mesh, _create_mesh)
 
@@ -459,6 +492,9 @@ class GLViewer:
         self.robot_heading_fill = FillPolygonHandler()
         self.robot_heading_fill.initialize()
         self.robot_heading_fill.color = [0.95, 0.90, 0.20]
+        self.pick_handler = PointHandler()
+        self.pick_handler.initialize()
+        self.pick_handler.color = [0.18, 1.0, 0.85]
 
         glLineWidth(1.)
         glPointSize(4.)
@@ -574,11 +610,31 @@ class GLViewer:
             fps = float(frame.get("fps", 0.0))
             offset = frame.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0})
             yaw_deg = float(frame.get("yaw_deg", 0.0))
+            selected = bool(frame.get("selected", False))
+            t_world_lidar_flat = frame.get("t_world_lidar", None)
+            t_world_lidar = None
+            if t_world_lidar_flat is not None:
+                try:
+                    arr = np.asarray(t_world_lidar_flat, dtype=np.float32).reshape(-1)
+                    if arr.size == 16:
+                        t_world_lidar = arr.reshape(4, 4)
+                except Exception:
+                    t_world_lidar = None
 
             handler = self._ensure_lidar_handler(name)
             alert_handler = self._ensure_lidar_alert_handler(name)
             handler.update(points)
             alert_handler.update(alert_points)
+            points_world_np = np.empty((0, 3), dtype=np.float32)
+            if points:
+                try:
+                    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+                    if pts.shape[0] > 15000:
+                        stride = max(1, int(pts.shape[0] / 15000))
+                        pts = pts[::stride]
+                    points_world_np = pts
+                except Exception:
+                    points_world_np = np.empty((0, 3), dtype=np.float32)
             self.lidar_status[name] = {
                 "connected": connected,
                 "point_count": len(points) // 3,
@@ -590,6 +646,9 @@ class GLViewer:
                     "z": float(offset.get("z", 0.0)),
                 },
                 "yaw_deg": yaw_deg,
+                "selected": selected,
+                "t_world_lidar": t_world_lidar,
+                "points_world": points_world_np,
             }
             seen_names.add(name)
 
@@ -727,8 +786,303 @@ class GLViewer:
 
     def _is_in_3d_viewport(self, mouse_x):
         wnd_w = glutGet(GLUT_WINDOW_WIDTH)
-        left_w = int(wnd_w / 3)
+        left_w = int(float(wnd_w) * float(self.layout_left_ratio))
         return mouse_x >= left_w
+
+    def _inside_viewport(self, x, y_gl, vp):
+        vx, vy, vw, vh = vp
+        return (int(x) >= int(vx)) and (int(x) < int(vx + vw)) and (int(y_gl) >= int(vy)) and (int(y_gl) < int(vy + vh))
+
+    def _extract_world_points_from_submap(self, sub_map):
+        try:
+            verts = np.asarray(sub_map.vert, dtype=np.float32)
+        except Exception:
+            return np.empty((0, 3), dtype=np.float32)
+        if verts.size <= 0:
+            return np.empty((0, 3), dtype=np.float32)
+        if self.draw_mesh:
+            if (verts.size % 3) != 0:
+                return np.empty((0, 3), dtype=np.float32)
+            return verts.reshape(-1, 3)
+        if (verts.size % 4) != 0:
+            return np.empty((0, 3), dtype=np.float32)
+        return verts.reshape(-1, 4)[:, :3]
+
+    def _select_primary_lidar_status(self):
+        selected_name = None
+        for name in self.lidar_order:
+            st = self.lidar_status.get(name, {})
+            if bool(st.get("selected", False)):
+                selected_name = name
+                break
+        if selected_name is not None:
+            return selected_name, self.lidar_status.get(selected_name, {})
+        for name in self.lidar_order:
+            st = self.lidar_status.get(name, {})
+            if bool(st.get("connected", False)):
+                return name, st
+        if self.lidar_order:
+            nm = self.lidar_order[0]
+            return nm, self.lidar_status.get(nm, {})
+        return None, {}
+
+    def _compute_nearest_lidar_error_world_locked(self, world_xyz):
+        lname, lst = self._select_primary_lidar_status()
+        if not isinstance(lst, dict):
+            return None, None, str(lname) if lname is not None else ""
+        pts = lst.get("points_world", None)
+        if pts is None:
+            return None, None, str(lname) if lname is not None else ""
+        try:
+            pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+        except Exception:
+            return None, None, str(lname) if lname is not None else ""
+        if pts.shape[0] <= 0:
+            return None, None, str(lname) if lname is not None else ""
+        p = np.asarray(world_xyz, dtype=np.float32).reshape(1, 3)
+        diff = pts - p
+        d2 = np.sum(diff * diff, axis=1)
+        idx = int(np.argmin(d2))
+        err_m = float(math.sqrt(float(d2[idx])))
+        nearest = pts[idx]
+        return err_m, nearest, str(lname) if lname is not None else ""
+
+    def _append_pick_record_locked(self):
+        if not self.pick_world_valid:
+            return
+        self.pick_seq += 1
+        err = self.pick_err_world_m
+        rec = {
+            "id": int(self.pick_seq),
+            "world": (
+                float(self.pick_world[0]),
+                float(self.pick_world[1]),
+                float(self.pick_world[2]),
+            ),
+            "err_m": float(err) if np.isfinite(err) else float("nan"),
+            "lidar": str(self.pick_lidar_name),
+            "angle_deg": float(self.pick_lidar_ang),
+            "dist_m": float(self.pick_lidar_dist),
+        }
+        self.pick_records.append(rec)
+        if len(self.pick_records) > int(self.max_pick_records):
+            self.pick_records = self.pick_records[-int(self.max_pick_records):]
+
+    def _project_world_to_rgb_uv(self, world_xyz):
+        if self.cam_fx <= 0.0 or self.cam_fy <= 0.0:
+            return None
+        try:
+            t_world_cam = np.asarray(self.pose.m, dtype=np.float64).reshape(4, 4)
+            t_cam_world = np.linalg.inv(t_world_cam)
+        except Exception:
+            return None
+        p_w = np.array([float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2]), 1.0], dtype=np.float64)
+        p_c = t_cam_world @ p_w
+        candidates = []
+        if abs(float(p_c[2])) > 1e-8:
+            zf = float(p_c[2])
+            u = (self.cam_fx * float(p_c[0]) / zf) + self.cam_cx
+            v = (self.cam_fy * float(p_c[1]) / zf) + self.cam_cy
+            candidates.append((u, v, zf))
+            zf2 = -float(p_c[2])
+            if zf2 > 1e-8:
+                u2 = (self.cam_fx * float(p_c[0]) / zf2) + self.cam_cx
+                v2 = (self.cam_fy * (-float(p_c[1])) / zf2) + self.cam_cy
+                candidates.append((u2, v2, zf2))
+        if not candidates:
+            return None
+        w = max(1, int(self.rgb_img_w))
+        h = max(1, int(self.rgb_img_h))
+        for u, v, zf in candidates:
+            if zf > 0.0 and (0.0 <= u < float(w)) and (0.0 <= v < float(h)):
+                return float(u), float(v)
+        u, v, _ = candidates[0]
+        return float(u), float(v)
+
+    def _update_picked_overlays_locked(self):
+        if not self.pick_world_valid:
+            self.pick_rgb_valid = False
+            self.pick_lidar_valid = False
+            self.pick_err_world_m = float("nan")
+            self.pick_nearest_valid = False
+            if self.pick_handler is not None:
+                self.pick_handler.update([])
+            return
+
+        if self.pick_handler is not None:
+            self.pick_handler.update([
+                float(self.pick_world[0]),
+                float(self.pick_world[1]),
+                float(self.pick_world[2]),
+            ])
+
+        rgb_uv = self._project_world_to_rgb_uv(self.pick_world)
+        if rgb_uv is None:
+            self.pick_rgb_valid = False
+        else:
+            self.pick_rgb_valid = True
+            self.pick_rgb_u = float(rgb_uv[0])
+            self.pick_rgb_v = float(rgb_uv[1])
+
+        lname, lst = self._select_primary_lidar_status()
+        self.pick_lidar_valid = False
+        self.pick_lidar_name = str(lname) if lname is not None else ""
+        t_world_lidar = lst.get("t_world_lidar", None) if isinstance(lst, dict) else None
+        if t_world_lidar is None:
+            return
+        try:
+            t_world_lidar = np.asarray(t_world_lidar, dtype=np.float64).reshape(4, 4)
+            t_lidar_world = np.linalg.inv(t_world_lidar)
+            p_w = np.array([float(self.pick_world[0]), float(self.pick_world[1]), float(self.pick_world[2]), 1.0], dtype=np.float64)
+            p_l = t_lidar_world @ p_w
+            lx = float(p_l[0])
+            lz = float(p_l[2])
+            self.pick_lidar_x = lx
+            self.pick_lidar_z = lz
+            self.pick_lidar_dist = float(math.sqrt((lx * lx) + (lz * lz)))
+            self.pick_lidar_ang = float(math.degrees(math.atan2(lx, -lz)))
+            self.pick_lidar_valid = True
+        except Exception:
+            self.pick_lidar_valid = False
+
+        err_m, nearest_w, _ = self._compute_nearest_lidar_error_world_locked(self.pick_world)
+        if err_m is None or nearest_w is None:
+            self.pick_err_world_m = float("nan")
+            self.pick_nearest_valid = False
+        else:
+            self.pick_err_world_m = float(err_m)
+            self.pick_nearest_world = np.array([
+                float(nearest_w[0]),
+                float(nearest_w[1]),
+                float(nearest_w[2]),
+            ], dtype=np.float32)
+            self.pick_nearest_valid = True
+
+    def _pick_world_point_from_mouse(self, mouse_x, mouse_y):
+        wnd_h = int(glutGet(GLUT_WINDOW_HEIGHT))
+        if wnd_h <= 0:
+            return False
+        y_gl = wnd_h - int(mouse_y) - 1
+        vp = self.mesh_viewport
+        if vp[2] <= 0 or vp[3] <= 0:
+            return False
+        if not self._inside_viewport(mouse_x, y_gl, vp):
+            return False
+
+        mvp = np.asarray(self.last_mesh_mvp, dtype=np.float64).reshape(4, 4)
+        sx = float(mouse_x)
+        sy = float(y_gl)
+        vx, vy, vw, vh = [float(v) for v in vp]
+
+        best_world = None
+        best_d2 = None
+        best_depth = None
+        max_sample_points = 30000
+
+        for sub in self.sub_maps:
+            pts = self._extract_world_points_from_submap(sub)
+            if pts.shape[0] <= 0:
+                continue
+            stride = max(1, int(pts.shape[0] / max_sample_points))
+            pts = pts[::stride]
+            ones = np.ones((pts.shape[0], 1), dtype=np.float64)
+            pts_h = np.concatenate([pts.astype(np.float64), ones], axis=1)
+            clip = (mvp @ pts_h.T).T
+            wv = clip[:, 3]
+            valid = np.abs(wv) > 1e-8
+            if not np.any(valid):
+                continue
+            clip = clip[valid]
+            pts_v = pts[valid]
+            ndc = clip[:, :3] / clip[:, 3:4]
+            in_view = (
+                (ndc[:, 0] >= -1.0) & (ndc[:, 0] <= 1.0) &
+                (ndc[:, 1] >= -1.0) & (ndc[:, 1] <= 1.0) &
+                (ndc[:, 2] >= -1.0) & (ndc[:, 2] <= 1.0)
+            )
+            if not np.any(in_view):
+                continue
+            ndc = ndc[in_view]
+            pts_v = pts_v[in_view]
+            px = vx + ((ndc[:, 0] + 1.0) * 0.5 * vw)
+            py = vy + ((ndc[:, 1] + 1.0) * 0.5 * vh)
+            d2 = ((px - sx) * (px - sx)) + ((py - sy) * (py - sy))
+            idx = int(np.argmin(d2))
+            cand_d2 = float(d2[idx])
+            cand_depth = float(ndc[idx, 2])
+            if (best_d2 is None) or (cand_d2 < best_d2) or (abs(cand_d2 - best_d2) < 1e-6 and cand_depth < best_depth):
+                best_d2 = cand_d2
+                best_depth = cand_depth
+                best_world = pts_v[idx]
+
+        if best_world is None:
+            return False
+        if best_d2 is not None and best_d2 > (30.0 * 30.0):
+            return False
+
+        self.pick_world_valid = True
+        self.pick_world = np.array([
+            float(best_world[0]),
+            float(best_world[1]),
+            float(best_world[2]),
+        ], dtype=np.float32)
+        self._update_picked_overlays_locked()
+        return True
+
+    def _pick_world_point_from_rgb_mouse(self, mouse_x, mouse_y):
+        wnd_h = int(glutGet(GLUT_WINDOW_HEIGHT))
+        if wnd_h <= 0:
+            return False
+        y_gl = wnd_h - int(mouse_y) - 1
+        vp = self.rgb_viewport
+        if vp[2] <= 0 or vp[3] <= 0:
+            return False
+        if not self._inside_viewport(mouse_x, y_gl, vp):
+            return False
+
+        vx, vy, vw, vh = [float(v) for v in vp]
+        nx = (float(mouse_x) - vx) / max(1.0, vw)
+        ny = (float(y_gl) - vy) / max(1.0, vh)
+        nx = min(1.0, max(0.0, nx))
+        ny = min(1.0, max(0.0, ny))
+        target_u = nx * float(max(1, self.rgb_img_w - 1))
+        target_v = (1.0 - ny) * float(max(1, self.rgb_img_h - 1))
+
+        best_world = None
+        best_d2 = None
+        max_sample_points = 30000
+
+        for sub in self.sub_maps:
+            pts = self._extract_world_points_from_submap(sub)
+            if pts.shape[0] <= 0:
+                continue
+            stride = max(1, int(pts.shape[0] / max_sample_points))
+            pts = pts[::stride]
+            for p in pts:
+                uv = self._project_world_to_rgb_uv(p)
+                if uv is None:
+                    continue
+                du = float(uv[0]) - target_u
+                dv = float(uv[1]) - target_v
+                d2 = (du * du) + (dv * dv)
+                if (best_d2 is None) or (d2 < best_d2):
+                    best_d2 = d2
+                    best_world = p
+
+        if best_world is None:
+            return False
+        # Click-to-point association threshold in RGB pixel space.
+        if best_d2 is not None and best_d2 > (45.0 * 45.0):
+            return False
+
+        self.pick_world_valid = True
+        self.pick_world = np.array([
+            float(best_world[0]),
+            float(best_world[1]),
+            float(best_world[2]),
+        ], dtype=np.float32)
+        self._update_picked_overlays_locked()
+        return True
 
     def mouse_button_callback(self, button, state, x, y):
         # FreeGLUT commonly reports wheel as mouse buttons 3(up) / 4(down).
@@ -739,12 +1093,22 @@ class GLViewer:
             if button == 4:
                 self.zoom_by_steps(-1.0)
                 return
+        if state == GLUT_DOWN and button == GLUT_RIGHT_BUTTON:
+            with self.mutex:
+                if self._pick_world_point_from_rgb_mouse(x, y):
+                    self._append_pick_record_locked()
+            return
 
         if button == GLUT_LEFT_BUTTON:
-            if state == GLUT_DOWN and self._is_in_3d_viewport(x):
-                self.drag_active = True
-                self.last_mouse_x = x
-                self.last_mouse_y = y
+            if state == GLUT_DOWN:
+                with self.mutex:
+                    if self._pick_world_point_from_rgb_mouse(x, y):
+                        self._append_pick_record_locked()
+                        return
+                if self._is_in_3d_viewport(x):
+                    self.drag_active = True
+                    self.last_mouse_x = x
+                    self.last_mouse_y = y
             elif state == GLUT_UP:
                 self.drag_active = False
 
@@ -792,8 +1156,8 @@ class GLViewer:
             world_z = float(b) + ny * float(t - b)
             dist = math.sqrt((world_x * world_x) + (world_z * world_z))
             # Inverse of local mapping used in lidar_thread.py:
-            # x = r*sin(theta), z = -r*cos(theta) -> theta = atan2(x, -z)
-            angle_deg = math.degrees(math.atan2(world_x, -world_z))
+            # x = -r*sin(theta), z = -r*cos(theta) -> theta = atan2(-x, -z)
+            angle_deg = math.degrees(math.atan2(-world_x, -world_z))
             self.lidar_2d_hover_x = world_x
             self.lidar_2d_hover_z = world_z
             self.lidar_2d_hover_dist = dist
@@ -817,9 +1181,103 @@ class GLViewer:
         ty = min(0.95, max(-0.92, py + 0.05))
         self.print_GL(tx, ty, f"D:{self.lidar_2d_hover_dist:.2f}m A:{self.lidar_2d_hover_angle_deg:+.1f}deg")
 
+    def draw_lidar_2d_pick_overlay(self):
+        vx, vy, vw, vh = self.lidar_2d_viewport
+        if vw <= 0 or vh <= 0:
+            return
+        if not self.pick_lidar_valid:
+            return
+        l, r, b, t = self.lidar_2d_ortho
+        nx = (float(self.pick_lidar_x) - float(l)) / max(1e-8, float(r - l))
+        ny = (float(self.pick_lidar_z) - float(b)) / max(1e-8, float(t - b))
+        nx = min(1.0, max(0.0, nx))
+        ny = min(1.0, max(0.0, ny))
+        x_ndc = -1.0 + (2.0 * nx)
+        y_ndc = -1.0 + (2.0 * ny)
+
+        glViewport(vx, vy, vw, vh)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glPointSize(7.0)
+        glColor3f(0.18, 1.0, 0.85)
+        glBegin(GL_POINTS)
+        glVertex2f(float(x_ndc), float(y_ndc))
+        glEnd()
+
+        glLineWidth(1.5)
+        glBegin(GL_LINES)
+        glVertex2f(float(x_ndc - 0.03), float(y_ndc))
+        glVertex2f(float(x_ndc + 0.03), float(y_ndc))
+        glVertex2f(float(x_ndc), float(y_ndc - 0.03))
+        glVertex2f(float(x_ndc), float(y_ndc + 0.03))
+        glEnd()
+
+        glColor3f(0.95, 0.95, 0.95)
+        self.print_GL(
+            -0.98,
+            0.90,
+            f"Pick[{self.pick_lidar_name}] X:{self.pick_lidar_x:+.2f} Z:{self.pick_lidar_z:+.2f} "
+            f"D:{self.pick_lidar_dist:.2f}m A:{self.pick_lidar_ang:+.1f}",
+        )
+
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+
+    def draw_rgb_pick_overlay(self):
+        vx, vy, vw, vh = self.rgb_viewport
+        if vw <= 0 or vh <= 0:
+            return
+        if not self.pick_rgb_valid:
+            return
+        if self.rgb_img_w <= 1 or self.rgb_img_h <= 1:
+            return
+        nx = float(self.pick_rgb_u) / float(max(1, self.rgb_img_w - 1))
+        ny = 1.0 - (float(self.pick_rgb_v) / float(max(1, self.rgb_img_h - 1)))
+        nx = min(1.0, max(0.0, nx))
+        ny = min(1.0, max(0.0, ny))
+        x_ndc = -1.0 + (2.0 * nx)
+        y_ndc = -1.0 + (2.0 * ny)
+
+        glViewport(vx, vy, vw, vh)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+
+        glLineWidth(2.0)
+        glColor3f(0.18, 1.0, 0.85)
+        glBegin(GL_LINES)
+        glVertex2f(float(x_ndc - 0.04), float(y_ndc))
+        glVertex2f(float(x_ndc + 0.04), float(y_ndc))
+        glVertex2f(float(x_ndc), float(y_ndc - 0.04))
+        glVertex2f(float(x_ndc), float(y_ndc + 0.04))
+        glEnd()
+
+        glColor3f(0.95, 0.95, 0.95)
+        self.print_GL(
+            -0.98,
+            0.90,
+            f"Pick RGB u:{self.pick_rgb_u:.0f} v:{self.pick_rgb_v:.0f}  "
+            f"W:{self.pick_world[0]:+.2f},{self.pick_world[1]:+.2f},{self.pick_world[2]:+.2f}",
+        )
+
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+
     def _lidar_angle_to_world_xz(self, angle_deg, radius):
         rad = math.radians(float(angle_deg))
-        x = float(radius) * math.sin(rad)
+        x = -float(radius) * math.sin(rad)
         z = -float(radius) * math.cos(rad)
         return x, z
 
@@ -868,6 +1326,7 @@ class GLViewer:
 
             self.mutex.acquire()
             self.update()
+            self._update_picked_overlays_locked()
             
             wnd_w = glutGet(GLUT_WINDOW_WIDTH)
             wnd_h = glutGet(GLUT_WINDOW_HEIGHT)
@@ -878,6 +1337,7 @@ class GLViewer:
             right_w = wnd_w - left_w
             # 1. Draw Mesh (Right Side)
             glViewport(left_w, 0, right_w, wnd_h)
+            self.mesh_viewport = (int(left_w), 0, int(right_w), int(wnd_h))
             self.draw_3d_mesh()
             
             # 2. Draw 2D Images (Left Side)
@@ -887,7 +1347,9 @@ class GLViewer:
             # Top-Left: RGB
             rgb_vp = self._fit_viewport_keep_aspect(0, lidar_h, left_w, rgb_h, self.rgb_aspect_ratio)
             glViewport(rgb_vp[0], rgb_vp[1], rgb_vp[2], rgb_vp[3])
+            self.rgb_viewport = (int(rgb_vp[0]), int(rgb_vp[1]), int(rgb_vp[2]), int(rgb_vp[3]))
             self.image_handler.draw(self.image_handler.tex_rgb)
+            self.draw_rgb_pick_overlay()
 
             # Bottom-Left: LiDAR 2D View
             glViewport(0, 0, left_w, lidar_h)
@@ -990,6 +1452,7 @@ class GLViewer:
                 if name in self.lidar_alert_handlers:
                     self.lidar_alert_handlers[name].draw(mvp_2d)
             self.draw_lidar_2d_hover_overlay()
+            self.draw_lidar_2d_pick_overlay()
 
             # Restoring logic
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -1024,10 +1487,51 @@ class GLViewer:
 
     def draw_control_status(self, left_w, wnd_h):
         if not self.control_status_text:
-            return
+            pass
         glViewport(left_w, 0, int(glutGet(GLUT_WINDOW_WIDTH) - left_w), wnd_h)
         glColor3f(0.88, 0.88, 0.88)
-        self.print_GL(-0.95, -0.92, self.control_status_text)
+        if self.control_status_text:
+            self.print_GL(-0.95, -0.92, self.control_status_text)
+        self.draw_pick_list_overlay()
+
+    def draw_pick_list_overlay(self):
+        glColor3f(0.92, 0.92, 0.92)
+        self.print_GL(-0.95, 0.96, "Pick List (RGB click)")
+        if not self.pick_records:
+            glColor3f(0.75, 0.75, 0.75)
+            self.print_GL(-0.95, 0.90, "No picks yet")
+            return
+
+        valid_err = [float(r.get("err_m", float("nan"))) for r in self.pick_records if np.isfinite(float(r.get("err_m", float("nan"))))]
+        avg_err = float(np.mean(valid_err)) if valid_err else float("nan")
+        glColor3f(0.82, 0.92, 0.85)
+        if np.isfinite(avg_err):
+            self.print_GL(-0.95, 0.90, f"Avg err = {avg_err:.3f} m (n={len(valid_err)})")
+        else:
+            self.print_GL(-0.95, 0.90, "Avg err = -")
+
+        y = 0.84
+        for rec in reversed(self.pick_records):
+            if y < 0.30:
+                break
+            rid = int(rec.get("id", 0))
+            lidar_name = str(rec.get("lidar", ""))
+            err_m = float(rec.get("err_m", float("nan")))
+            ang = float(rec.get("angle_deg", 0.0))
+            dist_m = float(rec.get("dist_m", 0.0))
+            if np.isfinite(err_m):
+                line = f"#{rid:02d} [{lidar_name}] err={err_m:.3f}m dist={dist_m:.2f}m ang={ang:+.1f}"
+                if err_m <= 0.10:
+                    glColor3f(0.35, 0.95, 0.35)
+                elif err_m <= 0.20:
+                    glColor3f(0.95, 0.90, 0.30)
+                else:
+                    glColor3f(0.95, 0.45, 0.35)
+            else:
+                line = f"#{rid:02d} [{lidar_name}] err=- dist={dist_m:.2f}m ang={ang:+.1f}"
+                glColor3f(0.75, 0.75, 0.75)
+            self.print_GL(-0.95, y, line)
+            y -= 0.06
 
     # Update both Mesh and FPC
     def update(self):
@@ -1080,6 +1584,7 @@ class GLViewer:
         else:
             proj = (self.projection * tmp).m
             vpMat = proj.flatten()
+        self.last_mesh_mvp = np.asarray(vpMat, dtype=np.float32).reshape(4, 4)
 
         glUseProgram(self.shader_image.get_program_id())
         glUniformMatrix4fv(self.shader_MVP, 1, GL_TRUE, (GLfloat * len(vpMat))(*vpMat))
@@ -1098,6 +1603,9 @@ class GLViewer:
             for name in self.lidar_order:
                 if name in self.lidar_alert_handlers:
                     self.lidar_alert_handlers[name].draw(vpMat)
+            if self.pick_world_valid and self.pick_handler is not None:
+                glPointSize(10.0)
+                self.pick_handler.draw(vpMat, color_override=[0.18, 1.0, 0.85])
 
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 

@@ -1,5 +1,5 @@
 """
-[1단계: 녹화 로깅 기능]**과 [2단계: 오프라인 분석 스크립트] 구현 준비
+
 """
 import sys
 import time
@@ -17,10 +17,7 @@ try:
     from scipy.spatial import cKDTree
     HAS_SCIPY = True
 except ImportError:
-    print("\n[Error] 'scipy' 라이브러리가 설치되어 있지 않습니다!")
-    print("LiDAR 캘리브레이션(KD-Tree 연산)을 위해 필수입니다.")
-    print("설치 명령어: pip install scipy\n")
-    sys.exit(1)
+    HAS_SCIPY = False
 
 if os.name == "nt":
     import msvcrt
@@ -30,53 +27,6 @@ else:
     import tty
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lidar_config.json")
-
-class DataLogger:
-    def __init__(self, log_root="logs"):
-        self.log_root = log_root
-        self.is_logging = False
-        self.session_dir = None
-        self.lidar_dir = None
-        self.timestamps = []
-        self.poses = []
-
-    def start_logging(self):
-        if self.is_logging: return
-        self.is_logging = True
-        
-        time_str = time.strftime("%Y%m%d_%H%M%S")
-        self.session_dir = os.path.join(self.log_root, f"session_{time_str}")
-        self.lidar_dir = os.path.join(self.session_dir, "lidar_points")
-        os.makedirs(self.lidar_dir, exist_ok=True)
-        
-        self.timestamps.clear()
-        self.poses.clear()
-        print(f"🔴 [DataLogger] Record started: {self.session_dir}")
-
-    def log_frame(self, timestamp, t_world_robot_4x4, lidar_pts_nx3):
-        if not self.is_logging: return
-        
-        self.timestamps.append(timestamp)
-        self.poses.append(np.array(t_world_robot_4x4, dtype=np.float32))
-        
-        if len(lidar_pts_nx3) > 0:
-            np.save(os.path.join(self.lidar_dir, f"{timestamp:.6f}.npy"), np.array(lidar_pts_nx3, dtype=np.float32))
-
-    def stop_logging(self, zed_map_points=None):
-        if not self.is_logging: return
-        self.is_logging = False
-        
-        np.savez_compressed(
-            os.path.join(self.session_dir, "trajectory.npz"),
-            timestamps=np.array(self.timestamps, dtype=np.float64),
-            poses=np.array(self.poses, dtype=np.float32)
-        )
-        
-        if zed_map_points is not None and len(zed_map_points) > 0:
-            np.save(os.path.join(self.session_dir, "zed_map.npy"), np.array(zed_map_points, dtype=np.float32))
-            
-        print(f"⬛ [DataLogger] Record stopped: {len(self.timestamps)} frames saved.")
-
 
 
 def _to_np_4x4(mat_like):
@@ -255,14 +205,6 @@ def load_calibration_options(config):
     }
 
 
-def load_lidar_view_angle_options(config):
-    opt = config.get("lidar_view_angle", {})
-    return {
-        "min_deg": float(opt.get("min_deg", -180.0)),
-        "max_deg": float(opt.get("max_deg", 180.0)),
-    }
-
-
 def load_zed_options(config):
     zed_cfg = config.get("zed", {})
     init_cfg = zed_cfg.get("init", {})
@@ -339,11 +281,9 @@ def load_lidar_receivers(config_path, config=None):
 
     lidar_items = config.get("lidars", [])
     alert_options = load_lidar_alert_options(config)
-    view_options = load_lidar_view_angle_options(config)
     print(
         f"[LiDAR] 2D alert threshold: enabled={alert_options['enabled']} "
-        f"range=[{alert_options['min_m']:.2f}, {alert_options['max_m']:.2f}] m\n"
-        f"[LiDAR] View Angle: min={view_options['min_deg']:.1f}, max={view_options['max_deg']:.1f}"
+        f"range=[{alert_options['min_m']:.2f}, {alert_options['max_m']:.2f}] m"
     )
     receivers = []
 
@@ -373,8 +313,6 @@ def load_lidar_receivers(config_path, config=None):
             alert_enabled=alert_options["enabled"],
             alert_min_m=alert_options["min_m"],
             alert_max_m=alert_options["max_m"],
-            view_min_deg=view_options["min_deg"],
-            view_max_deg=view_options["max_deg"],
         )
         receivers.append(receiver)
 
@@ -497,8 +435,8 @@ def main():
     calib_map_points = np.empty((0, 3), dtype=np.float32)
     calib_last_compute_s = 0.0
     calib_compute_interval_s = 0.35
-    calib_max_map_points = 50000
-    calib_max_lidar_points = 5000
+    calib_max_map_points = 20000
+    calib_max_lidar_points = 1200
     calib_rmse_alpha = 0.2
     calib_state = {
         "active": False,
@@ -517,8 +455,6 @@ def main():
         "last_action": "startup_load",
         "last_error": "",
     }
-
-    data_logger = DataLogger()
 
     try:
         console_input_state = setup_console_input()
@@ -685,7 +621,6 @@ def main():
                     "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                     "yaw_deg": float(status.get("yaw_deg", 0.0)),
                     "alert_threshold": status.get("alert_threshold", {"enabled": False, "min_m": 0.0, "max_m": 1.0}),
-                    "view_angle": status.get("view_angle", {"min_deg": -180.0, "max_deg": 180.0}),
                 })
             selected_name = None
             selected = get_selected_lidar()
@@ -701,7 +636,6 @@ def main():
                     "max_m": float(alert_ui_state["max_m"]),
                 },
                 "robot_velocity": dict(robot_velocity_state),
-                "is_logging": bool(data_logger.is_logging),
                 "profiles": sorted([str(k) for k in profiles.keys()]),
                 "calibration": dict(calib_state),
                 "config_sync": dict(config_sync_state),
@@ -797,7 +731,7 @@ def main():
                     xyz = verts.reshape(verts.shape[0], -1)[:, :3]
                 if xyz.shape[0] <= 0:
                     continue
-                stride = max(1, int(xyz.shape[0] / 5000))
+                stride = max(1, int(xyz.shape[0] / 800))
                 pts_parts.append(xyz[::stride])
             if not pts_parts:
                 calib_map_points = np.empty((0, 3), dtype=np.float32)
@@ -872,11 +806,11 @@ def main():
 
             if nearest.size < 16:
                 return None, int(nearest.size)
-            valid = nearest[(nearest > 0.005) & (nearest < 0.8)]
+            valid = nearest[(nearest > 0.005) & (nearest < 1.25)]
             if valid.size < 16:
                 return None, int(valid.size)
-            p80 = float(np.percentile(valid, 80))
-            inlier = valid[valid <= p80]
+            p90 = float(np.percentile(valid, 90))
+            inlier = valid[valid <= p90]
             if inlier.size < 16:
                 return None, int(inlier.size)
             rmse = float(np.sqrt(np.mean(inlier * inlier)))
@@ -1128,22 +1062,6 @@ def main():
                 )
                 return True
 
-            if action == "view_angle_set":
-                mi = float(payload.get("min_deg", -180.0))
-                ma = float(payload.get("max_deg", 180.0))
-                if mi > ma:
-                    mi, ma = ma, mi
-                nonlocal config
-                if "lidar_view_angle" not in config:
-                    config["lidar_view_angle"] = {}
-                config["lidar_view_angle"]["min_deg"] = mi
-                config["lidar_view_angle"]["max_deg"] = ma
-                for lidar in lidars:
-                    lidar.set_view_angle(min_deg=mi, max_deg=ma)
-                request_config_save()
-                print(f"[ViewAngle] min_deg={mi:.1f}, max_deg={ma:.1f}")
-                return True
-
             selected = get_selected_lidar()
             if selected is None:
                 return False
@@ -1323,8 +1241,8 @@ def main():
                 
                 # Lock initial positions to prevent runaway drift on degenerate environments
                 init_x, init_z, init_yaw = best_x, best_z, best_yaw
-                max_drift_pos = 0.03  # 최대 3cm (기존 15cm) 이동 제한
-                max_drift_yaw = 3.0   # 최대 3도 (기존 30도) 회전 제한
+                max_drift_pos = 0.15  # maximum 15cm drift from initial position
+                max_drift_yaw = 30.0  # maximum 30 degrees drift
                 
                 def eval_target(x, y, z, yaw):
                     t_robot_lidar = build_extrinsic_4x4({"x": x, "y": y, "z": z}, yaw)
@@ -1341,8 +1259,8 @@ def main():
                     best_rmse = current_rmse
                 
                 print(f"[Auto ICP] Starting... initial RMSE: {best_rmse:.5f}")
-                step_pos = 0.01  # 탐색 시작 위치 이동 스텝 (기존 5cm -> 1cm)
-                step_yaw = 0.5   # 탐색 시작 회전 스텝 (기존 2도 -> 0.5도)
+                step_pos = 0.05
+                step_yaw = 2.0
                 
                 for _ in range(15):
                     improved = False
@@ -1372,7 +1290,7 @@ def main():
                     if not improved:
                         step_pos *= 0.5
                         step_yaw *= 0.5
-                        if step_pos < 0.001 and step_yaw < 0.05: # 종료 조건도 더 정밀하게 세팅
+                        if step_pos < 0.005 and step_yaw < 0.2:
                             break
                             
                 print(f"[Auto ICP] Done... final RMSE: {best_rmse:.5f}")
@@ -1425,12 +1343,6 @@ def main():
                 calib_state["note"] = "stopped"
                 calib_state["updated_at_s"] = time.time()
                 print("[Calib] stop")
-                return True
-            if action == "record_start":
-                data_logger.start_logging()
-                return True
-            if action == "record_stop":
-                data_logger.stop_logging(zed_map_points=calib_map_points)
                 return True
             ok = apply_offset_control(action, payload)
             if ok:
@@ -1646,12 +1558,6 @@ def main():
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         "yaw_deg": status.get("yaw_deg", 0.0),
                     })
-                    
-                    if data_logger.is_logging:
-                        target_n = str(calib_state.get("selected_name", "")).strip()
-                        if not target_n: target_n = lidars[0].name
-                        if lidar.name == target_n:
-                            data_logger.log_frame(frame_time_s if frame_time_s else now_wall, t_world_robot, pts_local)
                 if lag_samples_ms:
                     lag_avg = float(sum(lag_samples_ms) / max(1, len(lag_samples_ms)))
                     if float(runtime_perf["lidar_pose_lag_ms"]) <= 0.0:

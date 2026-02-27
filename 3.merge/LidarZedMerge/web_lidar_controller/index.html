@@ -97,6 +97,17 @@
         <button id="autoIcpBtn" type="button" style="border-color:var(--accent); color:var(--accent);">Auto ICP (Match)</button>
         <span id="calibInfo" class="status">RMSE: -</span>
       </div>
+      <div class="row" style="margin-top:8px;">
+        <label for="calibMaxDistInput">Calib MaxDist (m)</label>
+        <input id="calibMaxDistInput" type="number" min="0.2" max="20" step="0.1" value="4.0" style="width:90px;" />
+        <label for="calibVertRangeInput">Calib VertRange (m)</label>
+        <input id="calibVertRangeInput" type="number" min="0.01" max="5" step="0.01" value="0.35" style="width:90px;" />
+        <label for="calibAngleMinInput">Calib Angle Min</label>
+        <input id="calibAngleMinInput" type="number" min="-360" max="360" step="1" value="-55" style="width:80px;" />
+        <label for="calibAngleMaxInput">Calib Angle Max</label>
+        <input id="calibAngleMaxInput" type="number" min="-360" max="360" step="1" value="230" style="width:80px;" />
+        <button id="applyCalibOptBtn" type="button">Apply Calib ROI</button>
+      </div>
     </div>
 
     <div class="card">
@@ -159,6 +170,10 @@
     const alertMaxInput = $("alertMaxInput");
     const viewMinInput = $("viewMinInput");
     const viewMaxInput = $("viewMaxInput");
+    const calibMaxDistInput = $("calibMaxDistInput");
+    const calibVertRangeInput = $("calibVertRangeInput");
+    const calibAngleMinInput = $("calibAngleMinInput");
+    const calibAngleMaxInput = $("calibAngleMaxInput");
     const calibInfo = $("calibInfo");
     const syncInfo = $("syncInfo");
     const recordInfo = $("recordInfo");
@@ -216,6 +231,11 @@
         const va = selected ? (selected.view_angle || {}) : {};
         if (!isFieldEditing(viewMinInput) && typeof va.min_deg === "number") viewMinInput.value = Number(va.min_deg).toFixed(1);
         if (!isFieldEditing(viewMaxInput) && typeof va.max_deg === "number") viewMaxInput.value = Number(va.max_deg).toFixed(1);
+        const copt = data.calibration_options || {};
+        if (!isFieldEditing(calibMaxDistInput) && typeof copt.max_distance_m === "number") calibMaxDistInput.value = Number(copt.max_distance_m).toFixed(2);
+        if (!isFieldEditing(calibVertRangeInput) && typeof copt.vertical_range_m === "number") calibVertRangeInput.value = Number(copt.vertical_range_m).toFixed(2);
+        if (!isFieldEditing(calibAngleMinInput) && typeof copt.angle_min_deg === "number") calibAngleMinInput.value = Number(copt.angle_min_deg).toFixed(1);
+        if (!isFieldEditing(calibAngleMaxInput) && typeof copt.angle_max_deg === "number") calibAngleMaxInput.value = Number(copt.angle_max_deg).toFixed(1);
 
         const rv = data.robot_velocity || {};
         const speedMps = Number(rv.speed_mps || 0);
@@ -351,6 +371,15 @@
     $("autoIcpBtn").addEventListener("click", async () => {
       $("calibInfo").textContent = "Auto ICP Running...";
       await apiControl("auto_icp", { name: selectedName() });
+      await refreshState();
+    });
+    $("applyCalibOptBtn").addEventListener("click", async () => {
+      await apiControl("calibration_options_set", {
+        max_distance_m: Number(calibMaxDistInput.value || 4.0),
+        vertical_range_m: Number(calibVertRangeInput.value || 0.35),
+        angle_min_deg: Number(calibAngleMinInput.value || -55.0),
+        angle_max_deg: Number(calibAngleMaxInput.value || 230.0),
+      });
       await refreshState();
     });
 
