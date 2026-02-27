@@ -485,8 +485,8 @@ def main():
     calib_map_points = np.empty((0, 3), dtype=np.float32)
     calib_last_compute_s = 0.0
     calib_compute_interval_s = 0.35
-    calib_max_map_points = 6000
-    calib_max_lidar_points = 1200
+    calib_max_map_points = 50000
+    calib_max_lidar_points = 5000
     calib_rmse_alpha = 0.2
     calib_state = {
         "active": False,
@@ -784,7 +784,7 @@ def main():
                     xyz = verts.reshape(verts.shape[0], -1)[:, :3]
                 if xyz.shape[0] <= 0:
                     continue
-                stride = max(1, int(xyz.shape[0] / 800))
+                stride = max(1, int(xyz.shape[0] / 5000))
                 pts_parts.append(xyz[::stride])
             if not pts_parts:
                 calib_map_points = np.empty((0, 3), dtype=np.float32)
@@ -859,11 +859,11 @@ def main():
 
             if nearest.size < 16:
                 return None, int(nearest.size)
-            valid = nearest[(nearest > 0.005) & (nearest < 1.25)]
+            valid = nearest[(nearest > 0.005) & (nearest < 0.8)]
             if valid.size < 16:
                 return None, int(valid.size)
-            p90 = float(np.percentile(valid, 90))
-            inlier = valid[valid <= p90]
+            p80 = float(np.percentile(valid, 80))
+            inlier = valid[valid <= p80]
             if inlier.size < 16:
                 return None, int(inlier.size)
             rmse = float(np.sqrt(np.mean(inlier * inlier)))
@@ -1294,8 +1294,8 @@ def main():
                 
                 # Lock initial positions to prevent runaway drift on degenerate environments
                 init_x, init_z, init_yaw = best_x, best_z, best_yaw
-                max_drift_pos = 0.15  # maximum 15cm drift from initial position
-                max_drift_yaw = 30.0  # maximum 30 degrees drift
+                max_drift_pos = 0.03  # 최대 3cm (기존 15cm) 이동 제한
+                max_drift_yaw = 3.0   # 최대 3도 (기존 30도) 회전 제한
                 
                 def eval_target(x, y, z, yaw):
                     t_robot_lidar = build_extrinsic_4x4({"x": x, "y": y, "z": z}, yaw)
@@ -1312,8 +1312,8 @@ def main():
                     best_rmse = current_rmse
                 
                 print(f"[Auto ICP] Starting... initial RMSE: {best_rmse:.5f}")
-                step_pos = 0.05
-                step_yaw = 2.0
+                step_pos = 0.01  # 탐색 시작 위치 이동 스텝 (기존 5cm -> 1cm)
+                step_yaw = 0.5   # 탐색 시작 회전 스텝 (기존 2도 -> 0.5도)
                 
                 for _ in range(15):
                     improved = False
@@ -1343,7 +1343,7 @@ def main():
                     if not improved:
                         step_pos *= 0.5
                         step_yaw *= 0.5
-                        if step_pos < 0.005 and step_yaw < 0.2:
+                        if step_pos < 0.001 and step_yaw < 0.05: # 종료 조건도 더 정밀하게 세팅
                             break
                             
                 print(f"[Auto ICP] Done... final RMSE: {best_rmse:.5f}")
