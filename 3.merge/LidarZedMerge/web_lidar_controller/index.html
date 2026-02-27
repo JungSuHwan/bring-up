@@ -80,6 +80,14 @@
         <input id="alertMaxInput" type="number" min="0" max="100" step="0.01" value="1.5" />
         <button id="applyAlertBtn" type="button">Apply Alert Threshold</button>
       </div>
+      <div class="row" style="margin-top:8px;">
+        <label>View Angle(deg)</label>
+        <label for="viewMinInput">Min</label>
+        <input id="viewMinInput" type="number" min="-180" max="180" step="1" value="-180" style="width:70px;" />
+        <label for="viewMaxInput">Max</label>
+        <input id="viewMaxInput" type="number" min="-180" max="180" step="1" value="180" style="width:70px;" />
+        <button id="applyViewBtn" type="button">Apply View Angle</button>
+      </div>
     </div>
 
     <div class="card">
@@ -149,6 +157,8 @@
     const alertEnabled = $("alertEnabled");
     const alertMinInput = $("alertMinInput");
     const alertMaxInput = $("alertMaxInput");
+    const viewMinInput = $("viewMinInput");
+    const viewMaxInput = $("viewMaxInput");
     const calibInfo = $("calibInfo");
     const syncInfo = $("syncInfo");
     const recordInfo = $("recordInfo");
@@ -203,6 +213,10 @@
         if (!isFieldEditing(alertMaxInput) && typeof at.max_m === "number") alertMaxInput.value = Number(at.max_m).toFixed(2);
 
         const selected = lidars.find((l) => l.name === lidarSel.value) || lidars[0];
+        const va = selected ? (selected.view_angle || {}) : {};
+        if (!isFieldEditing(viewMinInput) && typeof va.min_deg === "number") viewMinInput.value = Number(va.min_deg).toFixed(1);
+        if (!isFieldEditing(viewMaxInput) && typeof va.max_deg === "number") viewMaxInput.value = Number(va.max_deg).toFixed(1);
+
         const rv = data.robot_velocity || {};
         const speedMps = Number(rv.speed_mps || 0);
         const speedKph = Number(rv.speed_kph || 0);
@@ -308,6 +322,15 @@
       await refreshState();
     });
     
+    $("applyViewBtn").addEventListener("click", async () => {
+      await apiControl("view_angle_set", {
+        min_deg: Number(viewMinInput.value || -180.0),
+        max_deg: Number(viewMaxInput.value || 180.0),
+      });
+      await refreshState();
+      await refreshState();
+    });
+
     $("recordStartBtn").addEventListener("click", async () => {
       await apiControl("record_start");
       await refreshState();

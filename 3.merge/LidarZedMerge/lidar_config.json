@@ -13,7 +13,7 @@
       "mode": "GEN_3",
       "initial_position_m": {
         "x": 0.0,
-        "y": 0.63,
+        "y": 0.73,
         "z": 0.0
       }
     },
@@ -40,8 +40,12 @@
   },
   "lidar_2d_alert_threshold": {
     "enabled": true,
-    "min_m": 0.0,
-    "max_m": 0.8
+    "min_m": 0.35,
+    "max_m": 0.4
+  },
+  "lidar_view_angle": {
+    "min_deg": -45.0,
+    "max_deg": 225.0
   },
   "calibration": {
     "max_distance_m": 4.0,

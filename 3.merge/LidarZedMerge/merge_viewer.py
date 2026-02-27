@@ -255,6 +255,14 @@ def load_calibration_options(config):
     }
 
 
+def load_lidar_view_angle_options(config):
+    opt = config.get("lidar_view_angle", {})
+    return {
+        "min_deg": float(opt.get("min_deg", -180.0)),
+        "max_deg": float(opt.get("max_deg", 180.0)),
+    }
+
+
 def load_zed_options(config):
     zed_cfg = config.get("zed", {})
     init_cfg = zed_cfg.get("init", {})
@@ -331,9 +339,11 @@ def load_lidar_receivers(config_path, config=None):
 
     lidar_items = config.get("lidars", [])
     alert_options = load_lidar_alert_options(config)
+    view_options = load_lidar_view_angle_options(config)
     print(
         f"[LiDAR] 2D alert threshold: enabled={alert_options['enabled']} "
-        f"range=[{alert_options['min_m']:.2f}, {alert_options['max_m']:.2f}] m"
+        f"range=[{alert_options['min_m']:.2f}, {alert_options['max_m']:.2f}] m\n"
+        f"[LiDAR] View Angle: min={view_options['min_deg']:.1f}, max={view_options['max_deg']:.1f}"
     )
     receivers = []
 
@@ -363,6 +373,8 @@ def load_lidar_receivers(config_path, config=None):
             alert_enabled=alert_options["enabled"],
             alert_min_m=alert_options["min_m"],
             alert_max_m=alert_options["max_m"],
+            view_min_deg=view_options["min_deg"],
+            view_max_deg=view_options["max_deg"],
         )
         receivers.append(receiver)
 
@@ -673,6 +685,7 @@ def main():
                     "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                     "yaw_deg": float(status.get("yaw_deg", 0.0)),
                     "alert_threshold": status.get("alert_threshold", {"enabled": False, "min_m": 0.0, "max_m": 1.0}),
+                    "view_angle": status.get("view_angle", {"min_deg": -180.0, "max_deg": 180.0}),
                 })
             selected_name = None
             selected = get_selected_lidar()
@@ -1113,6 +1126,22 @@ def main():
                     f"[Alert] threshold enabled={alert_ui_state['enabled']} "
                     f"range=[{alert_ui_state['min_m']:.2f}, {alert_ui_state['max_m']:.2f}] m"
                 )
+                return True
+
+            if action == "view_angle_set":
+                mi = float(payload.get("min_deg", -180.0))
+                ma = float(payload.get("max_deg", 180.0))
+                if mi > ma:
+                    mi, ma = ma, mi
+                nonlocal config
+                if "lidar_view_angle" not in config:
+                    config["lidar_view_angle"] = {}
+                config["lidar_view_angle"]["min_deg"] = mi
+                config["lidar_view_angle"]["max_deg"] = ma
+                for lidar in lidars:
+                    lidar.set_view_angle(min_deg=mi, max_deg=ma)
+                request_config_save()
+                print(f"[ViewAngle] min_deg={mi:.1f}, max_deg={ma:.1f}")
                 return True
 
             selected = get_selected_lidar()

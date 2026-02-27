@@ -22,6 +22,8 @@ class LidarReceiver(threading.Thread):
         alert_enabled=False,
         alert_min_m=0.0,
         alert_max_m=1.0,
+        view_min_deg=-180.0,
+        view_max_deg=180.0,
     ):
         super().__init__()
         self.ip = ip
@@ -46,6 +48,15 @@ class LidarReceiver(threading.Thread):
         self.alert_enabled = bool(alert_enabled)
         self.alert_min_m = float(alert_min_m)
         self.alert_max_m = float(alert_max_m)
+        self.view_min_deg = float(view_min_deg)
+        self.view_max_deg = float(view_max_deg)
+
+    def set_view_angle(self, min_deg=None, max_deg=None):
+        with self.lock:
+            if min_deg is not None:
+                self.view_min_deg = float(min_deg)
+            if max_deg is not None:
+                self.view_max_deg = float(max_deg)
 
     def set_alert_threshold(self, enabled=None, min_m=None, max_m=None):
         with self.lock:
@@ -223,9 +234,11 @@ class LidarReceiver(threading.Thread):
                 alert_enabled = bool(self.alert_enabled)
                 alert_min = float(self.alert_min_m)
                 alert_max = float(self.alert_max_m)
+                view_min = float(self.view_min_deg)
+                view_max = float(self.view_max_deg)
             angle_curr = angle_begin
             for r in ranges:
-                if r > 0.05:
+                if r > 0.05 and view_min <= angle_curr <= view_max:
                     # Coordinate Transformation
                     # Lidar Frame:
                     #   X: Forward
@@ -336,5 +349,9 @@ class LidarReceiver(threading.Thread):
                     "enabled": bool(self.alert_enabled),
                     "min_m": float(self.alert_min_m),
                     "max_m": float(self.alert_max_m),
+                },
+                "view_angle": {
+                    "min_deg": float(self.view_min_deg),
+                    "max_deg": float(self.view_max_deg),
                 },
             }
