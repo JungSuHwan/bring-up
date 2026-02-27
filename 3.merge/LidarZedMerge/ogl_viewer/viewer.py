@@ -432,6 +432,8 @@ class GLViewer:
         self.pick_records = []
         self.pick_seq = 0
         self.max_pick_records = 12
+        # 2D 라이더 클릭 소스 구분 ('lidar2d' or 'rgb' or '3d')
+        self.pick_source = ""
 
     def init(self, _params, _mesh, _create_mesh, show_window=True): 
         glutInit()
@@ -746,10 +748,10 @@ class GLViewer:
             return
 
         key_map = {
-            "s": "save_spatial_map",
+            "h": "save_spatial_map",
             "n": "select_prev_lidar",
             "m": "select_next_lidar",
-            "h": "offset_x_minus",
+            "a": "offset_x_minus",
             "l": "offset_x_plus",
             "u": "offset_y_plus",
             "o": "offset_y_minus",
@@ -878,25 +880,12 @@ class GLViewer:
             return None
         p_w = np.array([float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2]), 1.0], dtype=np.float64)
         p_c = t_cam_world @ p_w
-        candidates = []
-        if abs(float(p_c[2])) > 1e-8:
-            zf = float(p_c[2])
-            u = (self.cam_fx * float(p_c[0]) / zf) + self.cam_cx
-            v = (self.cam_fy * float(p_c[1]) / zf) + self.cam_cy
-            candidates.append((u, v, zf))
-            zf2 = -float(p_c[2])
-            if zf2 > 1e-8:
-                u2 = (self.cam_fx * float(p_c[0]) / zf2) + self.cam_cx
-                v2 = (self.cam_fy * (-float(p_c[1])) / zf2) + self.cam_cy
-                candidates.append((u2, v2, zf2))
-        if not candidates:
+        # ZED RIGHT_HANDED_Y_UP: forward is typically -Z in camera frame.
+        zf = -float(p_c[2])
+        if zf <= 1e-8:
             return None
-        w = max(1, int(self.rgb_img_w))
-        h = max(1, int(self.rgb_img_h))
-        for u, v, zf in candidates:
-            if zf > 0.0 and (0.0 <= u < float(w)) and (0.0 <= v < float(h)):
-                return float(u), float(v)
-        u, v, _ = candidates[0]
+        u = (self.cam_fx * float(p_c[0]) / zf) + self.cam_cx
+        v = self.cam_cy - (self.cam_fy * float(p_c[1]) / zf)
         return float(u), float(v)
 
     def _update_picked_overlays_locked(self):
@@ -1029,7 +1018,54 @@ class GLViewer:
         self._update_picked_overlays_locked()
         return True
 
+    def _pick_world_point_from_lidar_2d_mouse(self, mouse_x, mouse_y):
+        """2D 라이더 뷰에서 클릭한 위치 → 월드 좌표로 변환해 pick 파이프라인에 연결."""
+        wnd_h = int(glutGet(GLUT_WINDOW_HEIGHT))
+        if wnd_h <= 0:
+            return False
+        y_gl = wnd_h - int(mouse_y) - 1
+        vx, vy, vw, vh = self.lidar_2d_viewport
+        if vw <= 0 or vh <= 0:
+            return False
+        # 2D 라이더 뷰포트 내부 여부 확인
+        if not (int(mouse_x) >= vx and int(mouse_x) < (vx + vw) and
+                y_gl >= vy and y_gl < (vy + vh)):
+            return False
+
+        # 화면 좌표 → 라이더 로컬 XZ 좌표 (ortho 역변환)
+        l, r, b, t = self.lidar_2d_ortho
+        nx = (float(mouse_x) - float(vx)) / float(vw)
+        ny = (float(y_gl) - float(vy)) / float(vh)
+        local_x = float(l) + nx * float(r - l)
+        local_z = float(b) + ny * float(t - b)
+
+        # t_world_lidar 행렬로 라이더 로컬 → 월드 좌표 변환 (Y=0 평면 가정)
+        lname, lst = self._select_primary_lidar_status()
+        if not isinstance(lst, dict):
+            return False
+        t_world_lidar = lst.get("t_world_lidar", None)
+        if t_world_lidar is None:
+            return False
+        try:
+            t_world_lidar = np.asarray(t_world_lidar, dtype=np.float64).reshape(4, 4)
+            # 라이더 로컬 좌표 (X, 0, Z) → 월드 좌표
+            p_local = np.array([local_x, 0.0, local_z, 1.0], dtype=np.float64)
+            p_world = t_world_lidar @ p_local
+        except Exception:
+            return False
+
+        self.pick_world_valid = True
+        self.pick_source = "lidar2d"
+        self.pick_world = np.array([
+            float(p_world[0]),
+            float(p_world[1]),
+            float(p_world[2]),
+        ], dtype=np.float32)
+        self._update_picked_overlays_locked()
+        return True
+
     def _pick_world_point_from_rgb_mouse(self, mouse_x, mouse_y):
+
         wnd_h = int(glutGet(GLUT_WINDOW_HEIGHT))
         if wnd_h <= 0:
             return False
@@ -1095,6 +1131,9 @@ class GLViewer:
                 return
         if state == GLUT_DOWN and button == GLUT_RIGHT_BUTTON:
             with self.mutex:
+                if self._pick_world_point_from_lidar_2d_mouse(x, y):
+                    self._append_pick_record_locked()
+                    return
                 if self._pick_world_point_from_rgb_mouse(x, y):
                     self._append_pick_record_locked()
             return
@@ -1102,6 +1141,10 @@ class GLViewer:
         if button == GLUT_LEFT_BUTTON:
             if state == GLUT_DOWN:
                 with self.mutex:
+                    # 2D 라이더 뷰를 먼저 체크 → RGB → 3D
+                    if self._pick_world_point_from_lidar_2d_mouse(x, y):
+                        self._append_pick_record_locked()
+                        return
                     if self._pick_world_point_from_rgb_mouse(x, y):
                         self._append_pick_record_locked()
                         return
@@ -1496,7 +1539,7 @@ class GLViewer:
 
     def draw_pick_list_overlay(self):
         glColor3f(0.92, 0.92, 0.92)
-        self.print_GL(-0.95, 0.96, "Pick List (RGB click)")
+        self.print_GL(-0.95, 0.96, "Pick List (RGB/LiDAR2D click)")
         if not self.pick_records:
             glColor3f(0.75, 0.75, 0.75)
             self.print_GL(-0.95, 0.90, "No picks yet")

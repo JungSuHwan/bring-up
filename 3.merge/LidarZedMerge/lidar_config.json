@@ -40,8 +40,8 @@
   },
   "lidar_2d_alert_threshold": {
     "enabled": true,
-    "min_m": 0.1,
-    "max_m": 0.27
+    "min_m": 1.1,
+    "max_m": 1.2
   },
   "lidar_view_angle": {
     "min_deg": -45.0,
@@ -60,12 +60,12 @@
       "ip": "192.168.0.31",
       "port": 8000,
       "offset": {
-        "x": -0.36,
-        "y": -0.049999999999999996,
-        "z": 0.0
+        "x": -0.3,
+        "y": 0.0,
+        "z": -0.05
       },
       "rotation": {
-        "yaw_deg": 0.0
+        "yaw_deg": 30.0
       }
     },
     {

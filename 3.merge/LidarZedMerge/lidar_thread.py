@@ -290,7 +290,7 @@ class LidarReceiver(threading.Thread):
                     
                     # Step-1 only: polar -> local Cartesian (LiDAR local frame).
                     # Extrinsic(offset/yaw) and world transform are applied in merge_viewer.py.
-                    x_gl = -r * math.sin(rad)
+                    x_gl = r * math.sin(rad)
                     y_gl = 0.0
                     z_gl = -r * math.cos(rad)
                     

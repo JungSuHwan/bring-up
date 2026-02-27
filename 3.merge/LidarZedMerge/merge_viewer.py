@@ -1367,7 +1367,7 @@ def main():
         
         print("\n=== Controls ===")
         print("  [Space] : Start/Stop spatial mapping (RGB overlay)")
-        print("  [S] : Save current spatial map (mesh_gen.obj)")
+        print("  [H] : Save current spatial map (mesh_gen.obj)")
         print("  [Mouse Wheel on 3D view] : Zoom in/out")
         print("  [R] : Reset pan (viewer window)")
         print("  [External UI/API] Use /control for x/y/z/yaw/step realtime control")
@@ -1413,7 +1413,7 @@ def main():
                             continue
                         if key == b" ":
                             force_toggle_mapping = True
-                        if key in (b"s", b"S"):
+                        if key in (b"h", b"H"):
                             force_save_map = True
                 except Exception:
                     pass
@@ -1424,7 +1424,7 @@ def main():
                     continue
                 if key == b" ":
                     force_toggle_mapping = True
-                if key in (b"s", b"S"):
+                if key in (b"h", b"H"):
                     force_save_map = True
 
             if zed.grab(runtime_parameters) == sl.ERROR_CODE.SUCCESS:
@@ -1557,6 +1557,7 @@ def main():
                         "fps": status.get("fps", 0.0),
                         "offset": status.get("offset", {"x": 0.0, "y": 0.0, "z": 0.0}),
                         "yaw_deg": status.get("yaw_deg", 0.0),
+                        "t_world_lidar": t_world_lidar.flatten().tolist(),
                     })
                 if lag_samples_ms:
                     lag_avg = float(sum(lag_samples_ms) / max(1, len(lag_samples_ms)))

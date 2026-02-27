@@ -315,6 +315,17 @@
       await refreshState();
     }
 
+    function bindEnter(el, fn) {
+      if (!el) return;
+      el.addEventListener("keydown", async (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        try {
+          await fn();
+        } catch (_) {}
+      });
+    }
+
     $("refreshBtn").addEventListener("click", refreshState);
     $("saveJsonBtn").addEventListener("click", async () => {
       await apiControl("config_save_now", {});
@@ -407,6 +418,85 @@
       const name = selectedName();
       if (!name) return;
       await apiControl("lidar_yaw_set", { name, yaw_deg: 0 });
+      await refreshState();
+    });
+
+    bindEnter(xInput, async () => setAxis("x", xInput.value));
+    bindEnter(yInput, async () => setAxis("y", yInput.value));
+    bindEnter(zInput, async () => setAxis("z", zInput.value));
+    bindEnter(yawInput, async () => setYaw(yawInput.value));
+    bindEnter(stepInput, async () => {
+      await apiControl("offset_set_step", { step: Number(stepInput.value || 0.01) });
+      await refreshState();
+    });
+    bindEnter(yawStepInput, async () => {
+      await apiControl("yaw_set_step", { yaw_step_deg: Number(yawStepInput.value || 0.5) });
+      await refreshState();
+    });
+    bindEnter(alertMinInput, async () => {
+      await apiControl("alert_threshold_set", {
+        enabled: !!alertEnabled.checked,
+        min_m: Number(alertMinInput.value || 0),
+        max_m: Number(alertMaxInput.value || 0),
+      });
+      await refreshState();
+    });
+    bindEnter(alertMaxInput, async () => {
+      await apiControl("alert_threshold_set", {
+        enabled: !!alertEnabled.checked,
+        min_m: Number(alertMinInput.value || 0),
+        max_m: Number(alertMaxInput.value || 0),
+      });
+      await refreshState();
+    });
+    bindEnter(viewMinInput, async () => {
+      await apiControl("view_angle_set", {
+        min_deg: Number(viewMinInput.value || -180.0),
+        max_deg: Number(viewMaxInput.value || 180.0),
+      });
+      await refreshState();
+    });
+    bindEnter(viewMaxInput, async () => {
+      await apiControl("view_angle_set", {
+        min_deg: Number(viewMinInput.value || -180.0),
+        max_deg: Number(viewMaxInput.value || 180.0),
+      });
+      await refreshState();
+    });
+    bindEnter(calibMaxDistInput, async () => {
+      await apiControl("calibration_options_set", {
+        max_distance_m: Number(calibMaxDistInput.value || 4.0),
+        vertical_range_m: Number(calibVertRangeInput.value || 0.35),
+        angle_min_deg: Number(calibAngleMinInput.value || -55.0),
+        angle_max_deg: Number(calibAngleMaxInput.value || 230.0),
+      });
+      await refreshState();
+    });
+    bindEnter(calibVertRangeInput, async () => {
+      await apiControl("calibration_options_set", {
+        max_distance_m: Number(calibMaxDistInput.value || 4.0),
+        vertical_range_m: Number(calibVertRangeInput.value || 0.35),
+        angle_min_deg: Number(calibAngleMinInput.value || -55.0),
+        angle_max_deg: Number(calibAngleMaxInput.value || 230.0),
+      });
+      await refreshState();
+    });
+    bindEnter(calibAngleMinInput, async () => {
+      await apiControl("calibration_options_set", {
+        max_distance_m: Number(calibMaxDistInput.value || 4.0),
+        vertical_range_m: Number(calibVertRangeInput.value || 0.35),
+        angle_min_deg: Number(calibAngleMinInput.value || -55.0),
+        angle_max_deg: Number(calibAngleMaxInput.value || 230.0),
+      });
+      await refreshState();
+    });
+    bindEnter(calibAngleMaxInput, async () => {
+      await apiControl("calibration_options_set", {
+        max_distance_m: Number(calibMaxDistInput.value || 4.0),
+        vertical_range_m: Number(calibVertRangeInput.value || 0.35),
+        angle_min_deg: Number(calibAngleMinInput.value || -55.0),
+        angle_max_deg: Number(calibAngleMaxInput.value || 230.0),
+      });
       await refreshState();
     });
 
