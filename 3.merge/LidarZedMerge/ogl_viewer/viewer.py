@@ -792,8 +792,8 @@ class GLViewer:
             world_z = float(b) + ny * float(t - b)
             dist = math.sqrt((world_x * world_x) + (world_z * world_z))
             # Inverse of local mapping used in lidar_thread.py:
-            # x = -r*sin(theta), z = -r*cos(theta) -> theta = atan2(-x, -z)
-            angle_deg = math.degrees(math.atan2(-world_x, -world_z))
+            # x = r*sin(theta), z = -r*cos(theta) -> theta = atan2(x, -z)
+            angle_deg = math.degrees(math.atan2(world_x, -world_z))
             self.lidar_2d_hover_x = world_x
             self.lidar_2d_hover_z = world_z
             self.lidar_2d_hover_dist = dist
@@ -819,7 +819,7 @@ class GLViewer:
 
     def _lidar_angle_to_world_xz(self, angle_deg, radius):
         rad = math.radians(float(angle_deg))
-        x = -float(radius) * math.sin(rad)
+        x = float(radius) * math.sin(rad)
         z = -float(radius) * math.cos(rad)
         return x, z
 
